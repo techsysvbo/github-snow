@@ -1,0 +1,59 @@
+name: PR Technical Checks
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Basic validation
+        run: |
+          echo "Starting technical checks"
+
+      - name: Placeholder - format
+        run: |
+          echo "Run formatter here"
+
+      - name: Placeholder - lint
+        run: |
+          echo "Run linter here"
+
+      - name: Placeholder - unit tests
+        run: |
+          echo "Run tests here"
+
+      - name: Placeholder - secret scanning
+        run: |
+          echo "Run secret scanning here"
+
+      - name: Placeholder - CodeQL
+        run: |
+          echo "Run CodeQL here"
+
+      - name: Placeholder - Checkov
+        run: |
+          echo "Run Checkov here"
+
+      - name: Placeholder - Sonar
+        run: |
+          echo "Run Sonar here"
+
+      - name: Placeholder - Nexus policy
+        run: |
+          echo "Run Nexus/IQ policy here"
+
+      - name: Placeholder - Terraform validate/plan
+        run: |
+          echo "Run Terraform validate and plan here"

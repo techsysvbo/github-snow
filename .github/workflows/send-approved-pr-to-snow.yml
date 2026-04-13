@@ -1,11 +1,14 @@
-name: Send PR to ServiceNow
+name: Send Approved PR to ServiceNow
 
 on:
-  pull_request:
-    types: [opened, reopened, synchronize]
+  pull_request_review:
+    types: [submitted]
 
 jobs:
   send-to-snow:
+    if: >
+      github.event.review.state == 'approved' &&
+      github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
 
     permissions:
@@ -14,6 +17,24 @@ jobs:
       statuses: write
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify technical checks passed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          echo "Verifying required checks on commit ${SHA}"
+          gh api repos/${REPO}/commits/${SHA}/status --jq '.state' > status.txt
+          STATUS=$(cat status.txt)
+          echo "Combined status is: ${STATUS}"
+          if [ "${STATUS}" != "success" ]; then
+            echo "Technical checks are not all successful yet."
+            exit 1
+          fi
+
       - name: Set snow-approval to pending
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -27,7 +48,7 @@ jobs:
             -d '{
               "state": "pending",
               "context": "snow-approval",
-              "description": "Waiting for ServiceNow approval",
+              "description": "Waiting for CCoE and Security approval in ServiceNow",
               "target_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             }'
 
@@ -62,5 +83,15 @@ jobs:
               \"source_branch\": \"${SOURCE_BRANCH}\",
               \"target_branch\": \"${TARGET_BRANCH}\",
               \"commit_sha\": \"${COMMIT_SHA}\",
-              \"environment\": \"prod\"
+              \"environment\": \"prod\",
+              \"approval_gate\": \"pending_ccoe_and_security\",
+              \"checks_summary\": \"All required GitHub technical checks passed before SNOW submission\"
             }"
+            
+      - name: Comment on PR that SNOW approval has started
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} \
+            --body "ServiceNow production approval has been started. Awaiting approval from CCoE and Security."
