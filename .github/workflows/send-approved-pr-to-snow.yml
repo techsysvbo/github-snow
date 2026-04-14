@@ -1,122 +1,122 @@
-name: Send Approved PR to ServiceNow
+name: Send PR Payload to ServiceNow
 
 on:
-  pull_request_review:
-    types: [submitted]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
 
 jobs:
   send-to-snow:
-    if: >
-      github.event.review.state == 'approved' &&
-      github.event.pull_request.base.ref == 'main'
+    if: github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
 
-    permissions:
-      contents: read
-      pull-requests: write
-      statuses: write
-
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify technical checks passed
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          echo "Verifying required checks on commit ${SHA}"
-          gh api repos/${REPO}/commits/${SHA}/status --jq '.state' > status.txt
-          STATUS=$(cat status.txt)
-          echo "Combined status is: ${STATUS}"
-          if [ "${STATUS}" != "success" ]; then
-            echo "Technical checks are not all successful yet."
-            exit 1
-          fi
+      - name: Check if payload was already sent
+        id: labelcheck
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = context.payload.pull_request.labels.map(label => label.name);
+            const alreadySent = labels.includes('snow-payload-sent');
+            core.setOutput('already_sent', alreadySent ? 'true' : 'false');
 
-      - name: Set snow-approval to pending
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SHA: ${{ github.event.pull_request.head.sha }}
+      - name: Stop if payload was already sent
+        if: steps.labelcheck.outputs.already_sent == 'true'
         run: |
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -L -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${{ github.repository }}/statuses/${SHA}" \
-            -d '{
-              "state": "pending",
-              "context": "snow-approval",
-              "description": "Waiting for CCoE and Security approval in ServiceNow",
-              "target_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            }')
-          echo "GitHub Statuses API response code: ${HTTP_CODE}"
-          if [[ "${HTTP_CODE}" -lt 200 || "${HTTP_CODE}" -ge 300 ]]; then
-            echo "Failed to set snow-approval status. HTTP ${HTTP_CODE}"
-            exit 1
-          fi
+          echo "Payload already sent to ServiceNow for this PR."
+          exit 0
 
-      - name: Send PR payload to ServiceNow
-        env:
-          SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
-          SN_API_PATH: ${{ secrets.SN_API_PATH }}
-          SN_API_USER: ${{ secrets.SN_API_USER }}
-          SN_API_PASSWORD: ${{ secrets.SN_API_PASSWORD }}
-          SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO_NAME: ${{ github.event.repository.name }}
-          REPO_FULL_NAME: ${{ github.repository }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          SOURCE_BRANCH: ${{ github.event.pull_request.head.ref }}
-          TARGET_BRANCH: ${{ github.event.pull_request.base.ref }}
-          COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+      - name: Set ServiceNow approval status to pending
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+
+            await github.rest.repos.createCommitStatus({
+              owner,
+              repo,
+              sha: pr.head.sha,
+              state: 'pending',
+              context: 'servicenow/prod-approval',
+              description: 'Waiting for ServiceNow approval',
+              target_url: pr.html_url
+            });
+
+      - name: Build payload JSON
         run: |
-          payload="$(jq -n \
-            --arg pr_number "${PR_NUMBER}" \
-            --arg repo_name "${REPO_NAME}" \
-            --arg repo_full_name "${REPO_FULL_NAME}" \
-            --arg pr_title "${PR_TITLE}" \
-            --arg pr_url "${PR_URL}" \
-            --arg pr_author "${PR_AUTHOR}" \
-            --arg source_branch "${SOURCE_BRANCH}" \
-            --arg target_branch "${TARGET_BRANCH}" \
-            --arg commit_sha "${COMMIT_SHA}" \
-            --arg environment "prod" \
-            --arg approval_gate "pending_ccoe_and_security" \
-            --arg checks_summary "All required GitHub technical checks passed before SNOW submission" \
-            '{
-              pr_number: $pr_number,
-              repo_name: $repo_name,
-              repo_full_name: $repo_full_name,
-              pr_title: $pr_title,
-              pr_url: $pr_url,
-              pr_author: $pr_author,
-              source_branch: $source_branch,
-              target_branch: $target_branch,
-              commit_sha: $commit_sha,
-              environment: $environment,
-              approval_gate: $approval_gate,
-              checks_summary: $checks_summary
-            }')"
+          cat > payload.json <<EOF
+          {
+            "pr_number": ${{ github.event.pull_request.number }},
+            "pr_url": "${{ github.event.pull_request.html_url }}",
+            "repo_name": "${{ github.event.repository.name }}",
+            "repo_owner": "${{ github.repository_owner }}",
+            "source_branch": "${{ github.event.pull_request.head.ref }}",
+            "target_branch": "${{ github.event.pull_request.base.ref }}",
+            "commit_sha": "${{ github.event.pull_request.head.sha }}",
+            "pr_title": "${{ github.event.pull_request.title }}",
+            "pr_author": "${{ github.event.pull_request.user.login }}",
+            "requested_at": "${{ github.event.pull_request.updated_at }}",
+            "environment": "production",
+            "external_correlation_id": "${{ github.event.repository.name }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}"
+          }
+          EOF
 
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${SN_INSTANCE_URL}${SN_API_PATH}" \
-            -u "${SN_API_USER}:${SN_API_PASSWORD}" \
+          echo "Payload created:"
+          cat payload.json
+
+      - name: Send payload to ServiceNow
+        env:
+          SNOW_URL: ${{ secrets.SNOW_URL }}
+          SNOW_USER: ${{ secrets.SNOW_USER }}
+          SNOW_PASSWORD: ${{ secrets.SNOW_PASSWORD }}
+        run: |
+          echo "Sending payload to ServiceNow..."
+          HTTP_STATUS=$(curl -s -o response.txt -w "%{http_code}" -X POST "$SNOW_URL" \
+            -u "$SNOW_USER:$SNOW_PASSWORD" \
             -H "Content-Type: application/json" \
-            -H "x-github-shared-secret: ${SN_GITHUB_SHARED_SECRET}" \
-            --data "${payload}")
-          echo "ServiceNow API response code: ${HTTP_CODE}"
-          if [[ "${HTTP_CODE}" -lt 200 || "${HTTP_CODE}" -ge 300 ]]; then
-            echo "ServiceNow request failed. HTTP ${HTTP_CODE}"
+            -d @payload.json)
+
+          echo "HTTP Status: $HTTP_STATUS"
+          echo "Response:"
+          cat response.txt
+
+          if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
+            echo "ServiceNow call failed."
             exit 1
           fi
-            
-      - name: Comment on PR that SNOW approval has started
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh pr comment ${{ github.event.pull_request.number }} \
-            --repo ${{ github.repository }} \
-            --body "ServiceNow production approval has been started. Awaiting approval from CCoE and Security."
+
+      - name: Add label to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+
+            await github.rest.issues.addLabels({
+              owner,
+              repo,
+              issue_number,
+              labels: ['snow-payload-sent']
+            });
+
+      - name: Add PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number,
+              body: 'Payload sent to ServiceNow. Waiting for ServiceNow approval before merge.'
+            });
