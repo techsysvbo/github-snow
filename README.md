@@ -169,7 +169,7 @@ Production-like JavaScript
 })(request, response);
 
 ########################################################
-This testing mode will leave or delete depending Testing
+This testing mode will leave or delete depending Testing. Another to test PR
 #####################################################
 name: Send Approved PR to ServiceNow
 
