@@ -1,122 +1,129 @@
 name: Send PR Payload to ServiceNow
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull Request Number"
+        required: true
+        type: string
 
 permissions:
   contents: read
-  pull-requests: write
-  statuses: write
+  pull-requests: read
 
 jobs:
   send-to-snow:
-    if: github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check if payload was already sent
-        id: labelcheck
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const labels = context.payload.pull_request.labels.map(label => label.name);
-            const alreadySent = labels.includes('snow-payload-sent');
-            core.setOutput('already_sent', alreadySent ? 'true' : 'false');
-
-      - name: Stop if payload was already sent
-        if: steps.labelcheck.outputs.already_sent == 'true'
+      - name: Validate required secrets
         run: |
-          echo "Payload already sent to ServiceNow for this PR."
-          exit 0
-
-      - name: Set ServiceNow approval status to pending
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const pr = context.payload.pull_request;
-            const { owner, repo } = context.repo;
-
-            await github.rest.repos.createCommitStatus({
-              owner,
-              repo,
-              sha: pr.head.sha,
-              state: 'pending',
-              context: 'servicenow/prod-approval',
-              description: 'Waiting for ServiceNow approval',
-              target_url: pr.html_url
-            });
-
-      - name: Build payload JSON
-        run: |
-          cat > payload.json <<EOF
-          {
-            "pr_number": ${{ github.event.pull_request.number }},
-            "pr_url": "${{ github.event.pull_request.html_url }}",
-            "repo_name": "${{ github.event.repository.name }}",
-            "repo_owner": "${{ github.repository_owner }}",
-            "source_branch": "${{ github.event.pull_request.head.ref }}",
-            "target_branch": "${{ github.event.pull_request.base.ref }}",
-            "commit_sha": "${{ github.event.pull_request.head.sha }}",
-            "pr_title": "${{ github.event.pull_request.title }}",
-            "pr_author": "${{ github.event.pull_request.user.login }}",
-            "requested_at": "${{ github.event.pull_request.updated_at }}",
-            "environment": "production",
-            "external_correlation_id": "${{ github.event.repository.name }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}"
-          }
-          EOF
-
-          echo "Payload created:"
-          cat payload.json
-
-      - name: Send payload to ServiceNow
-        env:
-          SNOW_URL: ${{ secrets.SNOW_URL }}
-          SNOW_USER: ${{ secrets.SNOW_USER }}
-          SNOW_PASSWORD: ${{ secrets.SNOW_PASSWORD }}
-        run: |
-          echo "Sending payload to ServiceNow..."
-          HTTP_STATUS=$(curl -s -o response.txt -w "%{http_code}" -X POST "$SNOW_URL" \
-            -u "$SNOW_USER:$SNOW_PASSWORD" \
-            -H "Content-Type: application/json" \
-            -d @payload.json)
-
-          echo "HTTP Status: $HTTP_STATUS"
-          echo "Response:"
-          cat response.txt
-
-          if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
-            echo "ServiceNow call failed."
+          if [ -z "${{ secrets.SN_INSTANCE_URL }}" ]; then
+            echo "SN_INSTANCE_URL is missing"
             exit 1
           fi
 
-      - name: Add label to PR
+          if [ -z "${{ secrets.SN_API_PATH }}" ]; then
+            echo "SN_API_PATH is missing"
+            exit 1
+          fi
+
+          if [ -z "${{ secrets.SN_API_USER }}" ]; then
+            echo "SN_API_USER is missing"
+            exit 1
+          fi
+
+          if [ -z "${{ secrets.SN_API_PASSWORD }}" ]; then
+            echo "SN_API_PASSWORD is missing"
+            exit 1
+          fi
+
+      - name: Get PR details
+        id: pr
         uses: actions/github-script@v7
         with:
           script: |
+            const prNumber = parseInt(core.getInput('pr_number', { required: true }), 10);
             const { owner, repo } = context.repo;
-            const issue_number = context.payload.pull_request.number;
 
-            await github.rest.issues.addLabels({
+            const { data: pr } = await github.rest.pulls.get({
               owner,
               repo,
-              issue_number,
-              labels: ['snow-payload-sent']
+              pull_number: prNumber
             });
 
-      - name: Add PR comment
-        uses: actions/github-script@v7
+            const rawPayload = {
+              pr_number: pr.number,
+              pr_title: pr.title || "",
+              pr_url: pr.html_url || "",
+              repository: repo,
+              repo_owner: owner,
+              source_branch: pr.head.ref || "",
+              target_branch: pr.base.ref || "",
+              commit_sha: pr.head.sha || "",
+              pr_author: pr.user?.login || "",
+              pr_state: pr.state || "",
+              mergeable: pr.mergeable === null ? "unknown" : String(pr.mergeable),
+              requested_by: context.actor || "",
+              triggered_at: new Date().toISOString(),
+              environment: pr.base.ref === "main" ? "prod" : "non-prod"
+            };
+
+            const payload = {
+              u_pr_number: pr.number,
+              u_pr_title: pr.title || "",
+              u_pr_url: pr.html_url || "",
+              u_repository: repo,
+              u_repo_owner: owner,
+              u_source_branch: pr.head.ref || "",
+              u_target_branch: pr.base.ref || "",
+              u_commit_sha: pr.head.sha || "",
+              u_pr_author: pr.user?.login || "",
+              u_pr_state: pr.state || "",
+              u_mergeable: pr.mergeable === null ? "unknown" : String(pr.mergeable),
+              u_requested_by: context.actor || "",
+              u_triggered_at: new Date().toISOString(),
+              u_environment: pr.base.ref === "main" ? "prod" : "non-prod",
+              u_status: "submitted",
+              u_payload_json: JSON.stringify(rawPayload)
+            };
+
+            core.setOutput("payload", JSON.stringify(payload));
+
+      - name: Print payload
+        run: |
+          echo '${{ steps.pr.outputs.payload }}'
+
+      - name: Send payload to ServiceNow
+        run: |
+          API_URL="${{ secrets.SN_INSTANCE_URL }}${{ secrets.SN_API_PATH }}"
+          echo "Calling: $API_URL"
+
+          cat > payload.json <<'EOF'
+          ${{ steps.pr.outputs.payload }}
+          EOF
+
+          HTTP_RESPONSE=$(curl -s -o response.json -w "%{http_code}" \
+            -X POST "$API_URL" \
+            --user "${{ secrets.SN_API_USER }}:${{ secrets.SN_API_PASSWORD }}" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            --data @payload.json)
+
+          echo "HTTP Status: $HTTP_RESPONSE"
+          cat response.json
+
+          if [ "$HTTP_RESPONSE" -lt 200 ] || [ "$HTTP_RESPONSE" -ge 300 ]; then
+            echo "ServiceNow API call failed"
+            exit 1
+          fi
+
+      - name: Upload response artifact
+        uses: actions/upload-artifact@v4
         with:
-          script: |
-            const { owner, repo } = context.repo;
-            const issue_number = context.payload.pull_request.number;
-
-            await github.rest.issues.createComment({
-              owner,
-              repo,
-              issue_number,
-              body: 'Payload sent to ServiceNow. Waiting for ServiceNow approval before merge.'
-            });
+          name: snow-response
+          path: response.json
