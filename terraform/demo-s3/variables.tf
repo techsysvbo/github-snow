@@ -1,11 +1,11 @@
 variable "aws_region" {
-  type    = string
-  default = "us-east-1"
+  type        = string
+  default     = "us-east-1"
   description = "AWS region for resources"
 }
 
 variable "bucket_prefix" {
-  type    = string
-  default = "snow-github-demo"
+  type        = string
+  default     = "snow-github-demo"
   description = "Prefix for S3 bucket names"
 }
