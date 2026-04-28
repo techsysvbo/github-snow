@@ -8,3 +8,12 @@ crash.log
 crash.*.log
 *.tfvars
 *.tfvars.json
+
+# Terraform local/cache files
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+crash.log
+crash.*.log
