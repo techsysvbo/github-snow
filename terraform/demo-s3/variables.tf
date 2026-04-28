@@ -6,6 +6,6 @@ variable "aws_region" {
 
 variable "bucket_prefix" {
   type        = string
-  default     = "snow-github-demo"
+  default     = "snow-github-demo-test"
   description = "Prefix for S3 bucket names"
 }
