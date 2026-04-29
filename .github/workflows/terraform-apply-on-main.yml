@@ -4,12 +4,11 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'terraform/**'
+
+  workflow_dispatch:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   terraform-apply:
@@ -23,17 +22,24 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials using OIDC
+      - name: Configure AWS credentials using access keys
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: us-east-1
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Confirm AWS identity
+        run: aws sts get-caller-identity
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
       - name: Terraform init
         run: terraform init
+
+      - name: Terraform validate
+        run: terraform validate
 
       - name: Terraform apply
         run: terraform apply -auto-approve
