@@ -1,0 +1,52 @@
+# ============================================================================
+# Workflow: Terraform PR Checks
+# Purpose: Validates Terraform files when infrastructure code changes
+# Trigger: When Terraform files change in a PR targeting main
+# ============================================================================
+
+name: Terraform PR Checks
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'terraform/**'
+
+permissions:
+  contents: read
+
+jobs:
+  terraform-checks:
+    runs-on: ubuntu-latest
+    
+    defaults:
+      run:
+        working-directory: terraform/demo-s3
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform fmt check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        run: terraform init
+
+      - name: Terraform validate
+        run: terraform validate
+
+      # Checkov Security Scan
+      # -------------------------------
+      #      - name: Run Checkov Scan
+      # uses: bridgecrewio/checkov-action@v12
+      # with:
+      #    directory: .
+      #    framework: terraform
+      #    output_format: json
+      #    output_file_path: checkov-report.json
+
