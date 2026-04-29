@@ -4,8 +4,8 @@ on:
   push:
     branches:
       - main
-    paths:
-      - "terraform/**"
+
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -22,8 +22,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Uses static AWS access key/secret stored in GitHub Actions secrets.
-      # This matches what you said you updated today.
       - name: Configure AWS credentials using access keys
         uses: aws-actions/configure-aws-credentials@v4
         with:
