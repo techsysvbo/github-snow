@@ -1,8 +1,6 @@
-# ============================================================================
-# Workflow: Terraform PR Checks
-# Purpose: Validates Terraform files when infrastructure code changes
-# Trigger: When Terraform files change in a PR targeting main
-# ============================================================================
+# This workflow checks Terraform before merge.
+# 7-year-old explanation:
+# GitHub checks the homework before it lets us turn it in.
 
 name: Terraform PR Checks
 
@@ -11,42 +9,57 @@ on:
     branches:
       - main
     paths:
-      - 'terraform/**'
+      - "terraform/**"
+      - ".github/workflows/**"
 
 permissions:
   contents: read
+  pull-requests: read
+  security-events: write
+
+env:
+  # Terraform should run without asking questions.
+  TF_IN_AUTOMATION: true
+  TF_INPUT: false
+
+  # Use your existing GitHub secret from the screenshot.
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
 
 jobs:
   terraform-checks:
+    name: terraform-checks
     runs-on: ubuntu-latest
-    
-    defaults:
-      run:
-        working-directory: terraform/demo-s3
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Checkout repository code
+        # Downloads your repo into the GitHub runner.
+        uses: actions/checkout@v5
 
       - name: Setup Terraform
+        # Installs Terraform in the GitHub runner.
         uses: hashicorp/setup-terraform@v3
 
-      - name: Terraform fmt check
+      - name: Terraform format check
+        # Checks if Terraform files are formatted correctly.
+        working-directory: terraform/demo-s3
         run: terraform fmt -check -recursive
 
       - name: Terraform init
-        run: terraform init
+        # Downloads Terraform providers and prepares the folder.
+        working-directory: terraform/demo-s3
+        run: terraform init -input=false
 
       - name: Terraform validate
+        # Confirms the Terraform code is valid.
+        working-directory: terraform/demo-s3
         run: terraform validate
 
-      # Checkov Security Scan
-      # -------------------------------
-      #      - name: Run Checkov Scan
-      # uses: bridgecrewio/checkov-action@v12
-      # with:
-      #    directory: .
-      #    framework: terraform
-      #    output_format: json
-      #    output_file_path: checkov-report.json
-
+      - name: Checkov security scan
+        # Checks for risky IaC issues like public buckets or hardcoded secrets.
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: terraform/demo-s3
+          framework: terraform
+          quiet: true
+          soft_fail: false
