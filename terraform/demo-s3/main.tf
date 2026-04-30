@@ -1,17 +1,39 @@
-# This creates a safe S3 bucket for the lab.
 # 7-year-old explanation:
-# We are creating a locked storage box in AWS.
+# This file creates safe AWS storage buckets.
+# The main bucket stores demo files.
+# The logs bucket stores access logs.
+# We also add encryption, versioning, lifecycle rules, and public access block.
+
+data "aws_caller_identity" "current" {}
 
 resource "random_id" "suffix" {
   byte_length = 4
 }
 
+# Creates a KMS key for S3 encryption.
 resource "aws_kms_key" "s3" {
   description             = "KMS key for S3 demo bucket encryption"
   deletion_window_in_days = 7
   enable_key_rotation     = true
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "EnableRootAccountPermissions"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+        }
+        Action   = "kms:*"
+        Resource = "*"
+      }
+    ]
+  })
 }
 
+# checkov:skip=CKV_AWS_144:Cross-region replication is not required for this lab logs bucket.
+# checkov:skip=CKV_AWS_62:Event notifications are not required for this lab logs bucket.
 resource "aws_s3_bucket" "logs" {
   bucket = "ccoe-snow-webhook-logs-${random_id.suffix.hex}"
 
@@ -50,10 +72,28 @@ resource "aws_s3_bucket_versioning" "logs" {
   }
 }
 
-resource "aws_s3_bucket" "demo" {
-  # checkov:skip=CKV_AWS_144:Cross-region replication is not required for this lab demo bucket.
-  # checkov:skip=CKV_AWS_62:Event notifications are not required for this lab demo bucket.
+resource "aws_s3_bucket_lifecycle_configuration" "logs" {
+  bucket = aws_s3_bucket.logs.id
 
+  rule {
+    id     = "logs-lifecycle"
+    status = "Enabled"
+
+    filter {}
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+}
+
+# checkov:skip=CKV_AWS_144:Cross-region replication is not required for this lab demo bucket.
+# checkov:skip=CKV_AWS_62:Event notifications are not required for this lab demo bucket.
+resource "aws_s3_bucket" "demo" {
   bucket = "ccoe-snow-webhook-demo-${random_id.suffix.hex}"
 
   tags = {
@@ -64,7 +104,6 @@ resource "aws_s3_bucket" "demo" {
 }
 
 resource "aws_s3_bucket_public_access_block" "demo" {
-  # This blocks public internet access.
   bucket = aws_s3_bucket.demo.id
 
   block_public_acls       = true
@@ -74,7 +113,6 @@ resource "aws_s3_bucket_public_access_block" "demo" {
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "demo" {
-  # This encrypts the bucket using KMS.
   bucket = aws_s3_bucket.demo.id
 
   rule {
@@ -86,7 +124,6 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "demo" {
 }
 
 resource "aws_s3_bucket_versioning" "demo" {
-  # This enables versioning.
   bucket = aws_s3_bucket.demo.id
 
   versioning_configuration {
@@ -95,7 +132,6 @@ resource "aws_s3_bucket_versioning" "demo" {
 }
 
 resource "aws_s3_bucket_logging" "demo" {
-  # This enables access logging.
   bucket = aws_s3_bucket.demo.id
 
   target_bucket = aws_s3_bucket.logs.id
@@ -103,14 +139,17 @@ resource "aws_s3_bucket_logging" "demo" {
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "demo" {
-  # This adds lifecycle management.
   bucket = aws_s3_bucket.demo.id
 
   rule {
-    id     = "expire-old-objects"
+    id     = "demo-lifecycle"
     status = "Enabled"
 
     filter {}
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
 
     noncurrent_version_expiration {
       noncurrent_days = 30
@@ -119,7 +158,6 @@ resource "aws_s3_bucket_lifecycle_configuration" "demo" {
 }
 
 resource "aws_s3_bucket_ownership_controls" "demo" {
-  # This makes the bucket owner control objects.
   bucket = aws_s3_bucket.demo.id
 
   rule {
