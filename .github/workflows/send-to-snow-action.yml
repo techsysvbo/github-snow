@@ -20,7 +20,6 @@ jobs:
       - name: Send PR payload to ServiceNow
         env:
           GH_TOKEN: ${{ github.token }}
-
           SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
           SN_API_USER: ${{ secrets.SN_API_USER }}
           SN_API_PASSWORD: ${{ secrets.SN_API_PASSWORD }}
@@ -40,8 +39,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Fetching PR reviews from GitHub..."
-
           REVIEWS_JSON=$(curl --silent --show-error --fail-with-body \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${GH_TOKEN}" \
@@ -59,8 +56,6 @@ jobs:
             exit 0
           fi
 
-          echo "Building ServiceNow payload..."
-
           jq -n \
             --arg shared_secret "$SN_GITHUB_SHARED_SECRET" \
             --arg owner "$OWNER" \
@@ -77,8 +72,8 @@ jobs:
             --arg github_checks_status "success" \
             --arg checkov_scan_result "pending" \
             --arg security_scan_result "pending" \
-            --arg environment "production" \
-            --arg impact_summary "Production-bound Terraform change submitted for ServiceNow approval." \
+            --arg environment "lab" \
+            --arg impact_summary "Lab Terraform change submitted for ServiceNow approval." \
             --arg rollback_plan "Revert PR or run Terraform rollback plan if needed." \
             --argjson approvers "$APPROVERS" \
             '{
@@ -108,8 +103,6 @@ jobs:
 
           echo "Payload preview:"
           jq '.data.shared_secret="****"' payload.json
-
-          echo "Sending payload to ServiceNow /submit endpoint..."
 
           HTTP_CODE=$(curl --silent --show-error -o response.json -w "%{http_code}" \
             -u "${SN_API_USER}:${SN_API_PASSWORD}" \

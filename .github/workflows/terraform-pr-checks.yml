@@ -3,7 +3,6 @@
 # Purpose: Validates Terraform files when infrastructure code changes
 # Trigger: When Terraform files change in a PR targeting main
 # ============================================================================
-
 name: Terraform PR Checks
 
 on:
@@ -11,7 +10,7 @@ on:
     branches:
       - main
     paths:
-      - 'terraform/**'
+      - "terraform/**"
 
 permissions:
   contents: read
@@ -19,7 +18,7 @@ permissions:
 jobs:
   terraform-checks:
     runs-on: ubuntu-latest
-    
+
     defaults:
       run:
         working-directory: terraform/demo-s3
@@ -35,18 +34,7 @@ jobs:
         run: terraform fmt -check -recursive
 
       - name: Terraform init
-        run: terraform init
+        run: terraform init -backend=false
 
       - name: Terraform validate
         run: terraform validate
-
-      # Checkov Security Scan
-      # -------------------------------
-      #      - name: Run Checkov Scan
-      # uses: bridgecrewio/checkov-action@v12
-      # with:
-      #    directory: .
-      #    framework: terraform
-      #    output_format: json
-      #    output_file_path: checkov-report.json
-
