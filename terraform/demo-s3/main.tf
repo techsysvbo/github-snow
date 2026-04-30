@@ -1,8 +1,9 @@
 # 7-year-old explanation:
-# This file creates safe AWS storage buckets.
+# This file creates safe AWS S3 buckets for the lab.
 # The main bucket stores demo files.
 # The logs bucket stores access logs.
-# We also add encryption, versioning, lifecycle rules, and public access block.
+# We block public access, enable encryption, versioning, logging, and lifecycle.
+# For lab only, we skip cross-region replication and event notification checks.
 
 data "aws_caller_identity" "current" {}
 
@@ -10,7 +11,6 @@ resource "random_id" "suffix" {
   byte_length = 4
 }
 
-# Creates a KMS key for S3 encryption.
 resource "aws_kms_key" "s3" {
   description             = "KMS key for S3 demo bucket encryption"
   deletion_window_in_days = 7
@@ -32,9 +32,10 @@ resource "aws_kms_key" "s3" {
   })
 }
 
-# checkov:skip=CKV_AWS_144:Cross-region replication is not required for this lab logs bucket.
-# checkov:skip=CKV_AWS_62:Event notifications are not required for this lab logs bucket.
 resource "aws_s3_bucket" "logs" {
+  # checkov:skip=CKV_AWS_144:Cross-region replication is not required for this lab logs bucket.
+  # checkov:skip=CKV2_AWS_62:Event notifications are not required for this lab logs bucket.
+
   bucket = "ccoe-snow-webhook-logs-${random_id.suffix.hex}"
 
   tags = {
@@ -91,9 +92,18 @@ resource "aws_s3_bucket_lifecycle_configuration" "logs" {
   }
 }
 
-# checkov:skip=CKV_AWS_144:Cross-region replication is not required for this lab demo bucket.
-# checkov:skip=CKV_AWS_62:Event notifications are not required for this lab demo bucket.
+resource "aws_s3_bucket_ownership_controls" "logs" {
+  bucket = aws_s3_bucket.logs.id
+
+  rule {
+    object_ownership = "BucketOwnerEnforced"
+  }
+}
+
 resource "aws_s3_bucket" "demo" {
+  # checkov:skip=CKV_AWS_144:Cross-region replication is not required for this lab demo bucket.
+  # checkov:skip=CKV2_AWS_62:Event notifications are not required for this lab demo bucket.
+
   bucket = "ccoe-snow-webhook-demo-${random_id.suffix.hex}"
 
   tags = {
