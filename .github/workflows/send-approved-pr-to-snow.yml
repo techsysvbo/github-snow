@@ -1,8 +1,12 @@
-# This workflow sends the approved PR to ServiceNow through /webhook.
 # 7-year-old explanation:
-# After GitHub checks the homework and one person approves it,
-# GitHub sends a note to ServiceNow saying:
-# "Please approve this before we merge."
+# After one reviewer approves the PR, GitHub first checks if Terraform checks passed.
+# If Terraform checks passed, GitHub sends the request to ServiceNow.
+# If Terraform checks are not ready yet, GitHub waits a little before giving up.
+
+# Expert explanation:
+# This workflow runs on pull_request_review approval.
+# It polls GitHub check-runs for terraform-checks to avoid timing/race issues.
+# It sets snow-approval to pending and sends the approval payload to ServiceNow /webhook.
 
 name: Send Approved PR to SNOW Webhook
 
@@ -18,7 +22,6 @@ permissions:
   checks: read
 
 env:
-  # These match your GitHub repository secrets.
   SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
   SN_API_USER: ${{ secrets.SN_API_USER }}
   SN_API_PASSWORD: ${{ secrets.SN_API_PASSWORD }}
@@ -30,41 +33,59 @@ jobs:
     name: send-to-snow-webhook
     runs-on: ubuntu-latest
 
-    # Only run when the PR review is approved and the PR targets main.
     if: github.event.review.state == 'approved' && github.event.pull_request.base.ref == 'main'
 
     steps:
       - name: Checkout repository code
-        # Downloads the repo so GitHub can read PR details.
         uses: actions/checkout@v5
 
       - name: Confirm Terraform checks passed
-        # This prevents GitHub from contacting SNOW if Terraform/checks failed.
         uses: actions/github-script@v7
         with:
           script: |
             const pr = context.payload.pull_request;
             const sha = pr.head.sha;
 
-            const { data } = await github.rest.checks.listForRef({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              ref: sha
-            });
+            const requiredCheckName = "terraform-checks";
+            let check = null;
 
-            const check = data.check_runs.find(c => c.name === "terraform-checks");
+            // Wait up to 60 seconds because PR approval can happen before GitHub finishes indexing check runs.
+            for (let attempt = 1; attempt <= 12; attempt++) {
+              const { data } = await github.rest.checks.listForRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: sha
+              });
+
+              check = data.check_runs.find(c => c.name === requiredCheckName);
+
+              if (check) {
+                core.info(`Found ${requiredCheckName}. Status=${check.status}; Conclusion=${check.conclusion}`);
+                break;
+              }
+
+              core.info(`Attempt ${attempt}: ${requiredCheckName} not found yet. Waiting 5 seconds...`);
+              await new Promise(resolve => setTimeout(resolve, 5000));
+            }
 
             if (!check) {
-              core.setFailed("terraform-checks was not found. Wait for the Terraform PR Checks workflow to run first.");
+              core.setFailed(`${requiredCheckName} was not found for commit ${sha}. Make sure Terraform PR Checks ran on the latest PR commit.`);
+              return;
+            }
+
+            if (check.status !== "completed") {
+              core.setFailed(`${requiredCheckName} is not completed yet. Current status: ${check.status}`);
+              return;
             }
 
             if (check.conclusion !== "success") {
-              core.setFailed(`terraform-checks is not successful. Current conclusion: ${check.conclusion}`);
+              core.setFailed(`${requiredCheckName} is not successful. Current conclusion: ${check.conclusion}`);
+              return;
             }
 
+            core.info(`${requiredCheckName} passed successfully.`);
+
       - name: Set SNOW approval status to pending
-        # This creates the GitHub check called snow-approval.
-        # Branch protection will block merge until SNOW changes this to success.
         uses: actions/github-script@v7
         with:
           script: |
@@ -81,9 +102,6 @@ jobs:
             });
 
       - name: Send PR payload to ServiceNow webhook
-        # This sends the PR details to your ServiceNow /webhook resource.
-        # SN_API_PATH must be:
-        # /api/x_2000997_github_0/github_pr_approval/webhook
         run: |
           FULL_SN_URL="${SN_INSTANCE_URL}${SN_API_PATH}"
 
