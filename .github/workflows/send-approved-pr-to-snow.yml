@@ -1,12 +1,11 @@
 # 7-year-old explanation:
-# After one reviewer approves the PR, GitHub first checks if Terraform checks passed.
-# If Terraform checks passed, GitHub sends the request to ServiceNow.
-# If Terraform checks are not ready yet, GitHub waits a little before giving up.
+# After one reviewer approves the PR, GitHub checks that Terraform already passed.
+# Then GitHub sends the request to ServiceNow.
 
 # Expert explanation:
-# This workflow runs on pull_request_review approval.
-# It polls GitHub check-runs for terraform-checks to avoid timing/race issues.
-# It sets snow-approval to pending and sends the approval payload to ServiceNow /webhook.
+# This workflow runs on PR review approval.
+# It waits up to 2 minutes for the terraform-checks check-run to appear.
+# It sets snow-approval to pending and sends payload to ServiceNow /webhook.
 
 name: Send Approved PR to SNOW Webhook
 
@@ -45,26 +44,25 @@ jobs:
           script: |
             const pr = context.payload.pull_request;
             const sha = pr.head.sha;
-
             const requiredCheckName = "terraform-checks";
+
             let check = null;
 
-            // Wait up to 60 seconds because PR approval can happen before GitHub finishes indexing check runs.
-            for (let attempt = 1; attempt <= 12; attempt++) {
+            for (let attempt = 1; attempt <= 24; attempt++) {
               const { data } = await github.rest.checks.listForRef({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 ref: sha
               });
 
+              core.info(`Attempt ${attempt}: found check runs: ${data.check_runs.map(c => `${c.name}:${c.status}:${c.conclusion}`).join(", ")}`);
+
               check = data.check_runs.find(c => c.name === requiredCheckName);
 
-              if (check) {
-                core.info(`Found ${requiredCheckName}. Status=${check.status}; Conclusion=${check.conclusion}`);
+              if (check && check.status === "completed") {
                 break;
               }
 
-              core.info(`Attempt ${attempt}: ${requiredCheckName} not found yet. Waiting 5 seconds...`);
               await new Promise(resolve => setTimeout(resolve, 5000));
             }
 
@@ -104,9 +102,6 @@ jobs:
       - name: Send PR payload to ServiceNow webhook
         run: |
           FULL_SN_URL="${SN_INSTANCE_URL}${SN_API_PATH}"
-
-          echo "Sending payload to ServiceNow webhook..."
-          echo "URL: ${FULL_SN_URL}"
 
           curl -sS -X POST "$FULL_SN_URL" \
             -u "${SN_API_USER}:${SN_API_PASSWORD}" \

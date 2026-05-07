@@ -1,12 +1,12 @@
 # 7-year-old explanation:
-# This workflow deploys only after code is merged into main.
-# Before building in AWS, GitHub checks Terraform again to make sure it is still safe.
-# After deployment, GitHub tells ServiceNow if deployment succeeded or failed.
+# After the PR is merged into main, GitHub deploys to AWS.
+# Before deploying, GitHub checks Terraform again.
+# Then GitHub tells ServiceNow if deployment worked.
 
 # Expert explanation:
-# This is the post-merge production deployment workflow.
-# It reruns fmt/validate/checkov as a defense-in-depth gate before apply.
-# It then calls ServiceNow back with deployment status and timestamp.
+# This workflow runs after merge/push to main.
+# It reruns fmt, validate, and Checkov before apply.
+# It sends deployment result back to ServiceNow.
 
 name: Terraform Deploy After Merge
 
@@ -14,8 +14,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - "terraform/**"
 
 permissions:
   contents: read

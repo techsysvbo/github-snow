@@ -1,6 +1,9 @@
-# This workflow checks Terraform before merge.
 # 7-year-old explanation:
-# GitHub checks the homework before it lets us turn it in.
+# GitHub checks the Terraform homework before anyone can merge.
+
+# Expert explanation:
+# This workflow is the PR quality/security gate.
+# The job name must stay terraform-checks because the SNOW workflow looks for it.
 
 name: Terraform PR Checks
 
@@ -18,11 +21,8 @@ permissions:
   security-events: write
 
 env:
-  # Terraform should run without asking questions.
   TF_IN_AUTOMATION: true
   TF_INPUT: false
-
-  # Use your existing GitHub secret from the screenshot.
   AWS_REGION: ${{ secrets.AWS_REGION }}
   AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
 
@@ -33,30 +33,24 @@ jobs:
 
     steps:
       - name: Checkout repository code
-        # Downloads your repo into the GitHub runner.
         uses: actions/checkout@v5
 
       - name: Setup Terraform
-        # Installs Terraform in the GitHub runner.
         uses: hashicorp/setup-terraform@v3
 
       - name: Terraform format check
-        # Checks if Terraform files are formatted correctly.
         working-directory: terraform/demo-s3
         run: terraform fmt -check -recursive
 
       - name: Terraform init
-        # Downloads Terraform providers and prepares the folder.
         working-directory: terraform/demo-s3
         run: terraform init -input=false
 
       - name: Terraform validate
-        # Confirms the Terraform code is valid.
         working-directory: terraform/demo-s3
         run: terraform validate
 
       - name: Checkov security scan
-        # Checks for risky IaC issues like public buckets or hardcoded secrets.
         uses: bridgecrewio/checkov-action@master
         with:
           directory: terraform/demo-s3
