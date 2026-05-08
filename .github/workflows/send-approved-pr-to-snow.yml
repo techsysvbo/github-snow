@@ -1,11 +1,12 @@
 # 7-year-old explanation:
-# After one reviewer approves the PR, GitHub checks that Terraform already passed.
-# Then GitHub sends the request to ServiceNow.
+# When a reviewer approves the PR, GitHub checks the Terraform code again.
+# If the code is safe, GitHub sends the PR to ServiceNow.
+# If the code is not safe, GitHub does not bother ServiceNow.
 
 # Expert explanation:
-# This workflow runs on PR review approval.
-# It waits up to 2 minutes for the terraform-checks check-run to appear.
-# It sets snow-approval to pending and sends payload to ServiceNow /webhook.
+# This workflow no longer depends on finding a separate terraform-checks check run.
+# It performs its own fmt/init/validate/Checkov gate before creating snow-approval=pending
+# and posting the approval payload to ServiceNow /webhook.
 
 name: Send Approved PR to SNOW Webhook
 
@@ -18,9 +19,14 @@ permissions:
   contents: read
   pull-requests: read
   statuses: write
-  checks: read
+  security-events: write
 
 env:
+  TF_IN_AUTOMATION: true
+  TF_INPUT: false
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+
   SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
   SN_API_USER: ${{ secrets.SN_API_USER }}
   SN_API_PASSWORD: ${{ secrets.SN_API_PASSWORD }}
@@ -36,54 +42,48 @@ jobs:
 
     steps:
       - name: Checkout repository code
+        # 7-year-old: GitHub downloads the PR code.
+        # Expert: Checkout PR head SHA, not main.
         uses: actions/checkout@v5
-
-      - name: Confirm Terraform checks passed
-        uses: actions/github-script@v7
         with:
-          script: |
-            const pr = context.payload.pull_request;
-            const sha = pr.head.sha;
-            const requiredCheckName = "terraform-checks";
+          ref: ${{ github.event.pull_request.head.sha }}
 
-            let check = null;
+      - name: Setup Terraform
+        # 7-year-old: GitHub installs Terraform.
+        # Expert: Required before fmt/init/validate.
+        uses: hashicorp/setup-terraform@v3
 
-            for (let attempt = 1; attempt <= 24; attempt++) {
-              const { data } = await github.rest.checks.listForRef({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                ref: sha
-              });
+      - name: Terraform format check
+        # 7-year-old: Checks if Terraform is neat.
+        # Expert: Blocks SNOW request if HCL formatting is wrong.
+        working-directory: terraform/demo-s3
+        run: terraform fmt -check -recursive
 
-              core.info(`Attempt ${attempt}: found check runs: ${data.check_runs.map(c => `${c.name}:${c.status}:${c.conclusion}`).join(", ")}`);
+      - name: Terraform init
+        # 7-year-old: Gets Terraform ready.
+        # Expert: Initializes providers for validation and scanning.
+        working-directory: terraform/demo-s3
+        run: terraform init -input=false
 
-              check = data.check_runs.find(c => c.name === requiredCheckName);
+      - name: Terraform validate
+        # 7-year-old: Checks if Terraform makes sense.
+        # Expert: Blocks SNOW request if Terraform is invalid.
+        working-directory: terraform/demo-s3
+        run: terraform validate
 
-              if (check && check.status === "completed") {
-                break;
-              }
-
-              await new Promise(resolve => setTimeout(resolve, 5000));
-            }
-
-            if (!check) {
-              core.setFailed(`${requiredCheckName} was not found for commit ${sha}. Make sure Terraform PR Checks ran on the latest PR commit.`);
-              return;
-            }
-
-            if (check.status !== "completed") {
-              core.setFailed(`${requiredCheckName} is not completed yet. Current status: ${check.status}`);
-              return;
-            }
-
-            if (check.conclusion !== "success") {
-              core.setFailed(`${requiredCheckName} is not successful. Current conclusion: ${check.conclusion}`);
-              return;
-            }
-
-            core.info(`${requiredCheckName} passed successfully.`);
+      - name: Checkov security scan
+        # 7-year-old: Checks if the AWS code is safe.
+        # Expert: Blocks SNOW request if IaC security scan fails.
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: terraform/demo-s3
+          framework: terraform
+          quiet: true
+          soft_fail: false
 
       - name: Set SNOW approval status to pending
+        # 7-year-old: GitHub puts up a stop sign saying “waiting for SNOW.”
+        # Expert: Required branch protection context.
         uses: actions/github-script@v7
         with:
           script: |
@@ -100,6 +100,8 @@ jobs:
             });
 
       - name: Send PR payload to ServiceNow webhook
+        # 7-year-old: GitHub sends the PR details to ServiceNow.
+        # Expert: Posts approved PR metadata to SNOW /webhook.
         run: |
           FULL_SN_URL="${SN_INSTANCE_URL}${SN_API_PATH}"
 
