@@ -6,9 +6,9 @@
 
 # Expert explanation:
 # This workflow runs on push to main.
+# It uses GitHub OIDC AssumeRole instead of AWS access keys.
 # It reruns Terraform fmt, validate, and Checkov before apply.
-# It parses PR number from merge commit message and sends deployment result to SNOW.
-# SNOW should match deployment callback by repo_name + pr_number first.
+# It sends deployment result back to ServiceNow.
 
 name: Terraform Deploy After Merge
 
@@ -24,12 +24,8 @@ permissions:
 env:
   TF_IN_AUTOMATION: true
   TF_INPUT: false
-
-# AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-# AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
   AWS_REGION: ${{ secrets.AWS_REGION }}
   AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
-
   SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
   SN_API_USER: ${{ secrets.SN_API_USER }}
   SN_API_PASSWORD: ${{ secrets.SN_API_PASSWORD }}
@@ -61,18 +57,19 @@ jobs:
             echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Configure AWS credentials using OIDC AssumeRole
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-session-name: GitHubActions
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
       - name: Terraform fmt check
         working-directory: terraform/demo-s3
         run: terraform fmt -check -recursive
-        
-      - name: Configure AWS credentials using OIDC AssumeRole
-        uses: aws-actions/configure-aws-credentials@v5
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Terraform init
         working-directory: terraform/demo-s3
