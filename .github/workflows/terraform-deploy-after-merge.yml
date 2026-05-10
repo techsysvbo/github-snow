@@ -1,12 +1,14 @@
 # 7-year-old explanation:
-# After the PR is merged into main, GitHub deploys to AWS.
-# Before deploying, GitHub checks Terraform again.
-# Then GitHub tells ServiceNow if deployment worked.
+# After ServiceNow approves and GitHub merges the PR into main,
+# GitHub deploys to AWS.
+# Then GitHub tells ServiceNow:
+# "Deployment worked" or "Deployment failed."
 
 # Expert explanation:
-# This workflow runs after merge/push to main.
-# It reruns fmt, validate, and Checkov before apply.
-# It sends deployment result back to ServiceNow.
+# This workflow runs on push to main.
+# It reruns Terraform fmt, validate, and Checkov before apply.
+# It parses PR number from merge commit message and sends deployment result to SNOW.
+# SNOW should match deployment callback by repo_name + pr_number first.
 
 name: Terraform Deploy After Merge
 
@@ -41,6 +43,23 @@ jobs:
     steps:
       - name: Checkout main branch
         uses: actions/checkout@v5
+
+      - name: Extract PR number from merge commit
+        id: pr_info
+        shell: bash
+        run: |
+          echo "Commit message:"
+          echo "${{ github.event.head_commit.message }}"
+
+          PR_NUMBER=$(echo "${{ github.event.head_commit.message }}" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
+
+          if [ -z "$PR_NUMBER" ]; then
+            echo "PR number not found in merge commit message."
+            echo "pr_number=" >> "$GITHUB_OUTPUT"
+          else
+            echo "Found PR number: $PR_NUMBER"
+            echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -88,6 +107,7 @@ jobs:
             -d "{
               \"shared_secret\": \"${SN_GITHUB_SHARED_SECRET}\",
               \"repo_name\": \"${{ github.repository }}\",
+              \"pr_number\": \"${{ steps.pr_info.outputs.pr_number }}\",
               \"commit_sha\": \"${{ github.sha }}\",
               \"deployment_status\": \"success\",
               \"deployment_environment\": \"production\",
@@ -105,6 +125,7 @@ jobs:
             -d "{
               \"shared_secret\": \"${SN_GITHUB_SHARED_SECRET}\",
               \"repo_name\": \"${{ github.repository }}\",
+              \"pr_number\": \"${{ steps.pr_info.outputs.pr_number }}\",
               \"commit_sha\": \"${{ github.sha }}\",
               \"deployment_status\": \"failure\",
               \"deployment_environment\": \"production\",
