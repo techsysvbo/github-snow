@@ -1,13 +1,3 @@
-# 7-year-old explanation:
-# After the PR is merged into main, GitHub deploys to AWS.
-# Before deploying, GitHub checks Terraform again.
-# Then GitHub tells ServiceNow if deployment worked.
-
-# Expert explanation:
-# This workflow runs after merge/push to main.
-# It reruns fmt, validate, and Checkov before apply.
-# It sends deployment result back to ServiceNow.
-
 name: Terraform Deploy After Merge
 
 on:
@@ -22,12 +12,8 @@ permissions:
 env:
   TF_IN_AUTOMATION: true
   TF_INPUT: false
-
-# AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-# AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
   AWS_REGION: ${{ secrets.AWS_REGION }}
   AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
-
   SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
   SN_API_USER: ${{ secrets.SN_API_USER }}
   SN_API_PASSWORD: ${{ secrets.SN_API_PASSWORD }}
@@ -42,18 +28,26 @@ jobs:
       - name: Checkout main branch
         uses: actions/checkout@v5
 
+      - name: Extract PR number from merge commit
+        id: pr_info
+        shell: bash
+        run: |
+          PR_NUMBER=$(echo "${{ github.event.head_commit.message }}" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials using OIDC AssumeRole
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-session-name: GitHubActions
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
       - name: Terraform fmt check
         working-directory: terraform/demo-s3
         run: terraform fmt -check -recursive
-        
-      - name: Configure AWS credentials using OIDC AssumeRole
-        uses: aws-actions/configure-aws-credentials@v5
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Terraform init
         working-directory: terraform/demo-s3
@@ -88,6 +82,7 @@ jobs:
             -d "{
               \"shared_secret\": \"${SN_GITHUB_SHARED_SECRET}\",
               \"repo_name\": \"${{ github.repository }}\",
+              \"pr_number\": \"${{ steps.pr_info.outputs.pr_number }}\",
               \"commit_sha\": \"${{ github.sha }}\",
               \"deployment_status\": \"success\",
               \"deployment_environment\": \"production\",
@@ -105,6 +100,7 @@ jobs:
             -d "{
               \"shared_secret\": \"${SN_GITHUB_SHARED_SECRET}\",
               \"repo_name\": \"${{ github.repository }}\",
+              \"pr_number\": \"${{ steps.pr_info.outputs.pr_number }}\",
               \"commit_sha\": \"${{ github.sha }}\",
               \"deployment_status\": \"failure\",
               \"deployment_environment\": \"production\",
