@@ -1,14 +1,16 @@
 # 7-year-old explanation:
 # After ServiceNow approves and GitHub merges the PR into main,
-# GitHub deploys to AWS.
-# Then GitHub tells ServiceNow:
-# "Deployment worked" or "Deployment failed."
+# GitHub does not deploy right away.
+# First, GitHub asks ServiceNow:
+# "Was this exact PR commit approved?"
+# If ServiceNow says yes, GitHub deploys to AWS.
+# Then GitHub tells ServiceNow whether deployment worked.
 
 # Expert explanation:
-# This workflow runs on push to main.
-# It uses GitHub OIDC AssumeRole instead of AWS access keys.
-# It reruns Terraform fmt, validate, and Checkov before apply.
-# It sends deployment result back to ServiceNow.
+# This workflow enforces deployment-time approval validation.
+# It validates the PR number, approved PR head SHA, merge commit SHA,
+# ServiceNow approval state, and status context before Terraform apply.
+# It uses GitHub OIDC AssumeRole instead of long-lived AWS access keys.
 
 name: Terraform Deploy After Merge
 
@@ -19,13 +21,16 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
   id-token: write
 
 env:
   TF_IN_AUTOMATION: true
   TF_INPUT: false
+
   AWS_REGION: ${{ secrets.AWS_REGION }}
   AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+
   SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
   SN_API_USER: ${{ secrets.SN_API_USER }}
   SN_API_PASSWORD: ${{ secrets.SN_API_PASSWORD }}
@@ -51,11 +56,80 @@ jobs:
 
           if [ -z "$PR_NUMBER" ]; then
             echo "PR number not found in merge commit message."
-            echo "pr_number=" >> "$GITHUB_OUTPUT"
-          else
-            echo "Found PR number: $PR_NUMBER"
-            echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+            exit 1
           fi
+
+          echo "Found PR number: $PR_NUMBER"
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Get approved PR head SHA
+        id: approved_sha
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = Number("${{ steps.pr_info.outputs.pr_number }}");
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+
+            core.info(`Approved PR head SHA: ${pr.head.sha}`);
+            core.info(`Merge commit SHA: ${context.sha}`);
+
+            core.setOutput("approved_commit_sha", pr.head.sha);
+
+      - name: Validate ServiceNow approval before production deployment
+        shell: bash
+        run: |
+          echo "Checking ServiceNow approval state and approved SHA before deployment..."
+
+          RESPONSE=$(curl -sS -X POST "${SN_INSTANCE_URL}/api/x_2000997_github_0/github_pr_approval/deployment-approval-check" \
+            -u "${SN_API_USER}:${SN_API_PASSWORD}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"shared_secret\": \"${SN_GITHUB_SHARED_SECRET}\",
+              \"repo_name\": \"${{ github.repository }}\",
+              \"pr_number\": \"${{ steps.pr_info.outputs.pr_number }}\",
+              \"approved_commit_sha\": \"${{ steps.approved_sha.outputs.approved_commit_sha }}\",
+              \"merge_commit_sha\": \"${{ github.sha }}\",
+              \"status_context\": \"snow-approval\",
+              \"deployment_environment\": \"production\",
+              \"deployment_pipeline_url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
+              \"deployment_run_id\": \"${{ github.run_id }}\"
+            }")
+
+          echo "ServiceNow response:"
+          echo "$RESPONSE"
+
+          python3 - <<PY
+          import json, sys
+
+          raw = '''$RESPONSE'''
+
+          try:
+              data = json.loads(raw)
+          except Exception as e:
+              print("Could not parse ServiceNow response as JSON.")
+              print(e)
+              sys.exit(1)
+
+          result = data.get("result", data)
+
+          approved = result.get("approved")
+          sha_match = result.get("sha_match")
+          context_match = result.get("context_match")
+          approval_state = result.get("approval_state")
+
+          if approved is True and sha_match is True and context_match is True and approval_state == "approved":
+              print("ServiceNow deployment-time approval validation passed.")
+              sys.exit(0)
+
+          print("ServiceNow deployment-time approval validation failed.")
+          print(result)
+          sys.exit(1)
+          PY
 
       - name: Configure AWS credentials using OIDC AssumeRole
         uses: aws-actions/configure-aws-credentials@v5
@@ -105,6 +179,8 @@ jobs:
               \"shared_secret\": \"${SN_GITHUB_SHARED_SECRET}\",
               \"repo_name\": \"${{ github.repository }}\",
               \"pr_number\": \"${{ steps.pr_info.outputs.pr_number }}\",
+              \"approved_commit_sha\": \"${{ steps.approved_sha.outputs.approved_commit_sha }}\",
+              \"merge_commit_sha\": \"${{ github.sha }}\",
               \"commit_sha\": \"${{ github.sha }}\",
               \"deployment_status\": \"success\",
               \"deployment_environment\": \"production\",
@@ -123,6 +199,8 @@ jobs:
               \"shared_secret\": \"${SN_GITHUB_SHARED_SECRET}\",
               \"repo_name\": \"${{ github.repository }}\",
               \"pr_number\": \"${{ steps.pr_info.outputs.pr_number }}\",
+              \"approved_commit_sha\": \"${{ steps.approved_sha.outputs.approved_commit_sha }}\",
+              \"merge_commit_sha\": \"${{ github.sha }}\",
               \"commit_sha\": \"${{ github.sha }}\",
               \"deployment_status\": \"failure\",
               \"deployment_environment\": \"production\",
