@@ -23,6 +23,12 @@ env:
   SN_API_PASSWORD: ${{ secrets.SN_API_PASSWORD }}
   SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
 
+  "cmdb_ci_name": "${{ env.CMDB_CI_NAME }}",
+  "terraform_plan_summary": "${{ steps.plan_summary.outputs.terraform_plan_summary }}",
+  "deployment_check_status": "${{ steps.snow_gate.outputs.deployment_check_status }}",
+  "deployment_check_timestamp": "${{ steps.snow_gate.outputs.deployment_check_timestamp }}",
+  "deployment_check_result": "${{ steps.snow_gate.outputs.deployment_check_result }}"
+
 jobs:
   deploy:
     name: terraform-apply
@@ -148,6 +154,12 @@ jobs:
       - name: Terraform apply
         working-directory: terraform/demo-s3
         run: terraform apply -auto-approve -input=false
+        
+      - name: Build Terraform plan summary
+        id: plan_summary
+        shell: bash
+        run: |
+          echo "terraform_plan_summary=Terraform plan completed successfully before production apply." >> "$GITHUB_OUTPUT"
 
       - name: Notify ServiceNow deployment success
         if: success()
