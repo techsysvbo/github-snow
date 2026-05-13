@@ -8,7 +8,6 @@
         "s3:CreateBucket",
         "s3:DeleteBucket",
         "s3:ListBucket",
-
         "s3:GetBucket*",
         "s3:GetAccelerateConfiguration",
         "s3:GetReplicationConfiguration",
@@ -22,7 +21,6 @@
         "s3:GetBucketAcl",
         "s3:GetBucketLocation",
         "s3:GetBucketTagging",
-
         "s3:PutBucket*",
         "s3:PutEncryptionConfiguration",
         "s3:PutLifecycleConfiguration",
