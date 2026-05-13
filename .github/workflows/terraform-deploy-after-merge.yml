@@ -1,14 +1,3 @@
-# 7-year-old explanation:
-# After ServiceNow approves and GitHub merges the PR into main,
-# GitHub checks with ServiceNow one more time before deploying.
-# Then GitHub uses AWS access key secrets to deploy with Terraform.
-# Finally, GitHub tells ServiceNow if deployment worked or failed.
-
-# Expert explanation:
-# This workflow uses AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY from GitHub Secrets.
-# It keeps the deployment-time ServiceNow approval gate before Terraform apply.
-# It sends deployment success/failure back to ServiceNow.
-
 name: Terraform Deploy After Merge
 
 on:
@@ -79,10 +68,9 @@ jobs:
             core.setOutput("approved_commit_sha", pr.head.sha);
 
       - name: Validate ServiceNow approval before production deployment
+        id: snow_gate
         shell: bash
         run: |
-          echo "Checking ServiceNow approval state and approved SHA before deployment..."
-
           RESPONSE=$(curl -sS -X POST "${SN_INSTANCE_URL}/api/x_2000997_github_0/github_pr_approval/deployment-approval-check" \
             -u "${SN_API_USER}:${SN_API_PASSWORD}" \
             -H "Content-Type: application/json" \
@@ -98,20 +86,14 @@ jobs:
               \"deployment_run_id\": \"${{ github.run_id }}\"
             }")
 
-          echo "ServiceNow response:"
           echo "$RESPONSE"
+          printf '%s' "$RESPONSE" > snow_gate_response.json
 
-          python3 - <<PY
-          import json, sys
+          python3 - <<'PY'
+          import json, sys, os
 
-          raw = '''$RESPONSE'''
-
-          try:
-              data = json.loads(raw)
-          except Exception as e:
-              print("Could not parse ServiceNow response as JSON.")
-              print(e)
-              sys.exit(1)
+          with open("snow_gate_response.json", "r") as f:
+              data = json.load(f)
 
           result = data.get("result", data)
 
@@ -119,6 +101,13 @@ jobs:
           approval_state = result.get("approval_state")
           sha_match = result.get("sha_match")
           context_match = result.get("context_match")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"deployment_check_status={result.get('deployment_check_status', '')}\n")
+              out.write(f"deployment_check_timestamp={result.get('deployment_check_timestamp', '')}\n")
+              out.write(f"merge_commit_sha={result.get('merge_commit_sha', '')}\n")
+              check_result = str(result.get("deployment_check_result", "")).replace("\n", " ")
+              out.write(f"deployment_check_result={check_result}\n")
 
           if approved is True and approval_state == "approved" and sha_match is True and context_match is True:
               print("ServiceNow deployment-time approval validation passed.")
@@ -173,6 +162,9 @@ jobs:
               \"approved_commit_sha\": \"${{ steps.approved_sha.outputs.approved_commit_sha }}\",
               \"merge_commit_sha\": \"${{ github.sha }}\",
               \"commit_sha\": \"${{ github.sha }}\",
+              \"deployment_check_status\": \"${{ steps.snow_gate.outputs.deployment_check_status }}\",
+              \"deployment_check_timestamp\": \"${{ steps.snow_gate.outputs.deployment_check_timestamp }}\",
+              \"deployment_check_result\": \"${{ steps.snow_gate.outputs.deployment_check_result }}\",
               \"deployment_status\": \"success\",
               \"deployment_environment\": \"production\",
               \"deployment_pipeline_url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
@@ -193,9 +185,12 @@ jobs:
               \"approved_commit_sha\": \"${{ steps.approved_sha.outputs.approved_commit_sha }}\",
               \"merge_commit_sha\": \"${{ github.sha }}\",
               \"commit_sha\": \"${{ github.sha }}\",
+              \"deployment_check_status\": \"${{ steps.snow_gate.outputs.deployment_check_status }}\",
+              \"deployment_check_timestamp\": \"${{ steps.snow_gate.outputs.deployment_check_timestamp }}\",
+              \"deployment_check_result\": \"${{ steps.snow_gate.outputs.deployment_check_result }}\",
               \"deployment_status\": \"failure\",
               \"deployment_environment\": \"production\",
               \"deployment_pipeline_url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
               \"deployment_run_id\": \"${{ github.run_id }}\",
               \"deployment_timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
-            }"
+            }" 
