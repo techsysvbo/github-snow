@@ -1,16 +1,13 @@
 # 7-year-old explanation:
 # After ServiceNow approves and GitHub merges the PR into main,
-# GitHub does not deploy right away.
-# First, GitHub asks ServiceNow:
-# "Was this exact PR commit approved?"
-# If ServiceNow says yes, GitHub deploys to AWS.
-# Then GitHub tells ServiceNow whether deployment worked.
+# GitHub checks with ServiceNow one more time before deploying.
+# If ServiceNow says this exact PR commit was approved, GitHub deploys.
+# Then GitHub tells ServiceNow if deployment worked or failed.
 
 # Expert explanation:
-# This workflow enforces deployment-time approval validation.
-# It validates the PR number, approved PR head SHA, merge commit SHA,
-# ServiceNow approval state, and status context before Terraform apply.
-# It uses GitHub OIDC AssumeRole instead of long-lived AWS access keys.
+# This workflow uses OIDC AssumeRole, not AWS access keys.
+# It validates the approved PR head SHA against the SNOW-approved SHA before Terraform apply.
+# It sends deployment success/failure back to SNOW.
 
 name: Terraform Deploy After Merge
 
@@ -27,10 +24,8 @@ permissions:
 env:
   TF_IN_AUTOMATION: true
   TF_INPUT: false
-
   AWS_REGION: ${{ secrets.AWS_REGION }}
   AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
-
   SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
   SN_API_USER: ${{ secrets.SN_API_USER }}
   SN_API_PASSWORD: ${{ secrets.SN_API_PASSWORD }}
@@ -118,11 +113,11 @@ jobs:
           result = data.get("result", data)
 
           approved = result.get("approved")
+          approval_state = result.get("approval_state")
           sha_match = result.get("sha_match")
           context_match = result.get("context_match")
-          approval_state = result.get("approval_state")
 
-          if approved is True and sha_match is True and context_match is True and approval_state == "approved":
+          if approved is True and approval_state == "approved" and sha_match is True and context_match is True:
               print("ServiceNow deployment-time approval validation passed.")
               sys.exit(0)
 
