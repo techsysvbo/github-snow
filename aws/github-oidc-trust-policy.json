@@ -5,7 +5,7 @@
       "Sid": "AllowGitHubActionsAssumeRole",
       "Effect": "Allow",
       "Principal": {
-        "Federated": "arn:aws:iam::557649278937:oidc-provider/token.actions.githubusercontent.com"
+        "Federated": "arn:aws:iam::355119163536:oidc-provider/token.actions.githubusercontent.com"
       },
       "Action": "sts:AssumeRoleWithWebIdentity",
       "Condition": {
