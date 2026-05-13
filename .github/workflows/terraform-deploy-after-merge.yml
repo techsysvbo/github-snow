@@ -3,7 +3,7 @@
 # GitHub checks with ServiceNow one more time before deploying.
 # If ServiceNow says this exact PR commit was approved, GitHub deploys.
 # Then GitHub tells ServiceNow if deployment worked or failed.
-
+#test  
 # Expert explanation:
 # This workflow uses OIDC AssumeRole, not AWS access keys.
 # It validates the approved PR head SHA against the SNOW-approved SHA before Terraform apply.
