@@ -1,13 +1,12 @@
 # 7-year-old explanation:
 # After ServiceNow approves and GitHub merges the PR into main,
 # GitHub checks with ServiceNow one more time before deploying.
-# If ServiceNow says yes, GitHub deploys to AWS using access key secrets.
-# Then GitHub tells ServiceNow if deployment worked or failed.
+# Then GitHub uses AWS access key secrets to deploy with Terraform.
+# Finally, GitHub tells ServiceNow if deployment worked or failed.
 
 # Expert explanation:
 # This workflow uses AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY from GitHub Secrets.
-# It enforces a deployment-time ServiceNow approval/SHA gate before Terraform apply.
-# It reruns Terraform fmt, validate, and Checkov before deployment.
+# It keeps the deployment-time ServiceNow approval gate before Terraform apply.
 # It sends deployment success/failure back to ServiceNow.
 
 name: Terraform Deploy After Merge
