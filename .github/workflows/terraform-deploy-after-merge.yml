@@ -1,13 +1,13 @@
 # 7-year-old explanation:
 # After ServiceNow approves and GitHub merges the PR into main,
 # GitHub checks with ServiceNow one more time before deploying.
-# If ServiceNow says this exact PR commit was approved, GitHub deploys.
-# Then GitHub tells ServiceNow if deployment worked or failed.
-#test  
+# Then GitHub uses AWS access key secrets to deploy with Terraform.
+# Finally, GitHub tells ServiceNow if deployment worked or failed.
+
 # Expert explanation:
-# This workflow uses OIDC AssumeRole, not AWS access keys.
-# It validates the approved PR head SHA against the SNOW-approved SHA before Terraform apply.
-# It sends deployment success/failure back to SNOW.
+# This workflow uses AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY from GitHub Secrets.
+# It keeps the deployment-time ServiceNow approval gate before Terraform apply.
+# It sends deployment success/failure back to ServiceNow.
 
 name: Terraform Deploy After Merge
 
@@ -19,13 +19,16 @@ on:
 permissions:
   contents: read
   pull-requests: read
-  id-token: write
 
 env:
   TF_IN_AUTOMATION: true
   TF_INPUT: false
+
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
   AWS_REGION: ${{ secrets.AWS_REGION }}
   AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+
   SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
   SN_API_USER: ${{ secrets.SN_API_USER }}
   SN_API_PASSWORD: ${{ secrets.SN_API_PASSWORD }}
@@ -125,13 +128,6 @@ jobs:
           print(result)
           sys.exit(1)
           PY
-
-      - name: Configure AWS credentials using OIDC AssumeRole
-        uses: aws-actions/configure-aws-credentials@v5
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ secrets.AWS_REGION }}
-          role-session-name: GitHubActions
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
