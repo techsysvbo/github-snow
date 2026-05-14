@@ -37,8 +37,10 @@ jobs:
       - name: Extract PR number from merge commit
         id: pr_info
         shell: bash
+        env:
+          HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
-          PR_NUMBER=$(echo "${{ github.event.head_commit.message }}" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
+          PR_NUMBER=$(echo "$HEAD_COMMIT_MESSAGE" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
 
           if [ -z "$PR_NUMBER" ]; then
             echo "PR number not found in merge commit message."
@@ -65,29 +67,48 @@ jobs:
       - name: Validate ServiceNow approval before production deployment
         id: snow_gate
         shell: bash
+        env:
+          REPO_NAME: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr_info.outputs.pr_number }}
+          APPROVED_COMMIT_SHA: ${{ steps.approved_sha.outputs.approved_commit_sha }}
+          MERGE_COMMIT_SHA: ${{ github.sha }}
+          DEPLOYMENT_PIPELINE_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DEPLOYMENT_RUN_ID: ${{ github.run_id }}
         run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          payload = {
+              "shared_secret": os.environ["SN_GITHUB_SHARED_SECRET"],
+              "repo_name": os.environ["REPO_NAME"],
+              "pr_number": os.environ["PR_NUMBER"],
+              "approved_commit_sha": os.environ["APPROVED_COMMIT_SHA"],
+              "merge_commit_sha": os.environ["MERGE_COMMIT_SHA"],
+              "status_context": "snow-approval",
+              "deployment_gate_context": "snow-deployment-gate",
+              "cmdb_ci_name": os.environ.get("CMDB_CI_NAME", ""),
+              "deployment_environment": "production",
+              "deployment_pipeline_url": os.environ["DEPLOYMENT_PIPELINE_URL"],
+              "deployment_run_id": os.environ["DEPLOYMENT_RUN_ID"]
+          }
+
+          with open("snow_gate_payload.json", "w") as f:
+              json.dump(payload, f)
+          PY
+
           RESPONSE=$(curl -sS -X POST "${SN_INSTANCE_URL}/api/x_2000997_github_0/github_pr_approval/deployment-approval-check" \
             -u "${SN_API_USER}:${SN_API_PASSWORD}" \
             -H "Content-Type: application/json" \
-            -d "{
-              \"shared_secret\": \"${SN_GITHUB_SHARED_SECRET}\",
-              \"repo_name\": \"${{ github.repository }}\",
-              \"pr_number\": \"${{ steps.pr_info.outputs.pr_number }}\",
-              \"approved_commit_sha\": \"${{ steps.approved_sha.outputs.approved_commit_sha }}\",
-              \"merge_commit_sha\": \"${{ github.sha }}\",
-              \"status_context\": \"snow-approval\",
-              \"deployment_gate_context\": \"snow-deployment-gate\",
-              \"cmdb_ci_name\": \"${CMDB_CI_NAME}\",
-              \"deployment_environment\": \"production\",
-              \"deployment_pipeline_url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
-              \"deployment_run_id\": \"${{ github.run_id }}\"
-            }")
+            --data @snow_gate_payload.json)
 
           echo "$RESPONSE" > snow_gate_response.json
           cat snow_gate_response.json
 
           python3 - <<'PY'
-          import json, sys, os
+          import json
+          import os
+          import sys
 
           with open("snow_gate_response.json", "r") as f:
               data = json.load(f)
@@ -98,8 +119,11 @@ jobs:
               out.write(f"deployment_check_status={result.get('deployment_check_status', '')}\n")
               out.write(f"deployment_check_timestamp={result.get('deployment_check_timestamp', '')}\n")
               out.write(f"merge_commit_sha={result.get('merge_commit_sha', '')}\n")
+
               check_result = str(result.get("deployment_check_result", "")).replace("\n", " ").replace('"', "'")
-              out.write(f"deployment_check_result={check_result}\n")
+              out.write("deployment_check_result<<EOF\n")
+              out.write(check_result + "\n")
+              out.write("EOF\n")
 
           if (
               result.get("approved") is True
@@ -158,50 +182,94 @@ jobs:
 
       - name: Notify ServiceNow deployment success
         if: success()
+        env:
+          REPO_NAME: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr_info.outputs.pr_number }}
+          APPROVED_COMMIT_SHA: ${{ steps.approved_sha.outputs.approved_commit_sha }}
+          MERGE_COMMIT_SHA: ${{ github.sha }}
+          TERRAFORM_PLAN_SUMMARY: ${{ steps.plan_summary.outputs.terraform_plan_summary }}
+          DEPLOYMENT_CHECK_STATUS: ${{ steps.snow_gate.outputs.deployment_check_status }}
+          DEPLOYMENT_CHECK_TIMESTAMP: ${{ steps.snow_gate.outputs.deployment_check_timestamp }}
+          DEPLOYMENT_CHECK_RESULT: ${{ steps.snow_gate.outputs.deployment_check_result }}
+          DEPLOYMENT_PIPELINE_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DEPLOYMENT_RUN_ID: ${{ github.run_id }}
         run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+
+          payload = {
+              "shared_secret": os.environ["SN_GITHUB_SHARED_SECRET"],
+              "repo_name": os.environ["REPO_NAME"],
+              "pr_number": os.environ["PR_NUMBER"],
+              "approved_commit_sha": os.environ["APPROVED_COMMIT_SHA"],
+              "merge_commit_sha": os.environ["MERGE_COMMIT_SHA"],
+              "commit_sha": os.environ["MERGE_COMMIT_SHA"],
+              "cmdb_ci_name": os.environ.get("CMDB_CI_NAME", ""),
+              "terraform_plan_summary": os.environ.get("TERRAFORM_PLAN_SUMMARY", ""),
+              "deployment_check_status": os.environ.get("DEPLOYMENT_CHECK_STATUS", ""),
+              "deployment_check_timestamp": os.environ.get("DEPLOYMENT_CHECK_TIMESTAMP", ""),
+              "deployment_check_result": os.environ.get("DEPLOYMENT_CHECK_RESULT", ""),
+              "deployment_status": "success",
+              "deployment_environment": "production",
+              "deployment_pipeline_url": os.environ["DEPLOYMENT_PIPELINE_URL"],
+              "deployment_run_id": os.environ["DEPLOYMENT_RUN_ID"],
+              "deployment_timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+          }
+
+          with open("deployment_result_payload.json", "w") as f:
+              json.dump(payload, f)
+          PY
+
           curl -sS -X POST "${SN_INSTANCE_URL}/api/x_2000997_github_0/github_pr_approval/deployment-result" \
             -u "${SN_API_USER}:${SN_API_PASSWORD}" \
             -H "Content-Type: application/json" \
-            -d "{
-              \"shared_secret\": \"${SN_GITHUB_SHARED_SECRET}\",
-              \"repo_name\": \"${{ github.repository }}\",
-              \"pr_number\": \"${{ steps.pr_info.outputs.pr_number }}\",
-              \"approved_commit_sha\": \"${{ steps.approved_sha.outputs.approved_commit_sha }}\",
-              \"merge_commit_sha\": \"${{ github.sha }}\",
-              \"commit_sha\": \"${{ github.sha }}\",
-              \"cmdb_ci_name\": \"${CMDB_CI_NAME}\",
-              \"terraform_plan_summary\": \"${{ steps.plan_summary.outputs.terraform_plan_summary }}\",
-              \"deployment_check_status\": \"${{ steps.snow_gate.outputs.deployment_check_status }}\",
-              \"deployment_check_timestamp\": \"${{ steps.snow_gate.outputs.deployment_check_timestamp }}\",
-              \"deployment_check_result\": \"${{ steps.snow_gate.outputs.deployment_check_result }}\",
-              \"deployment_status\": \"success\",
-              \"deployment_environment\": \"production\",
-              \"deployment_pipeline_url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
-              \"deployment_run_id\": \"${{ github.run_id }}\",
-              \"deployment_timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
-            }"
+            --data @deployment_result_payload.json
 
       - name: Notify ServiceNow deployment failure
         if: failure()
+        env:
+          REPO_NAME: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr_info.outputs.pr_number }}
+          APPROVED_COMMIT_SHA: ${{ steps.approved_sha.outputs.approved_commit_sha }}
+          MERGE_COMMIT_SHA: ${{ github.sha }}
+          TERRAFORM_PLAN_SUMMARY: ${{ steps.plan_summary.outputs.terraform_plan_summary }}
+          DEPLOYMENT_CHECK_STATUS: ${{ steps.snow_gate.outputs.deployment_check_status }}
+          DEPLOYMENT_CHECK_TIMESTAMP: ${{ steps.snow_gate.outputs.deployment_check_timestamp }}
+          DEPLOYMENT_CHECK_RESULT: ${{ steps.snow_gate.outputs.deployment_check_result }}
+          DEPLOYMENT_PIPELINE_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DEPLOYMENT_RUN_ID: ${{ github.run_id }}
         run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+
+          payload = {
+              "shared_secret": os.environ["SN_GITHUB_SHARED_SECRET"],
+              "repo_name": os.environ.get("REPO_NAME", ""),
+              "pr_number": os.environ.get("PR_NUMBER", ""),
+              "approved_commit_sha": os.environ.get("APPROVED_COMMIT_SHA", ""),
+              "merge_commit_sha": os.environ.get("MERGE_COMMIT_SHA", ""),
+              "commit_sha": os.environ.get("MERGE_COMMIT_SHA", ""),
+              "cmdb_ci_name": os.environ.get("CMDB_CI_NAME", ""),
+              "terraform_plan_summary": os.environ.get("TERRAFORM_PLAN_SUMMARY", ""),
+              "deployment_check_status": os.environ.get("DEPLOYMENT_CHECK_STATUS", ""),
+              "deployment_check_timestamp": os.environ.get("DEPLOYMENT_CHECK_TIMESTAMP", ""),
+              "deployment_check_result": os.environ.get("DEPLOYMENT_CHECK_RESULT", ""),
+              "deployment_status": "failure",
+              "deployment_environment": "production",
+              "deployment_pipeline_url": os.environ.get("DEPLOYMENT_PIPELINE_URL", ""),
+              "deployment_run_id": os.environ.get("DEPLOYMENT_RUN_ID", ""),
+              "deployment_timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+          }
+
+          with open("deployment_result_payload.json", "w") as f:
+              json.dump(payload, f)
+          PY
+
           curl -sS -X POST "${SN_INSTANCE_URL}/api/x_2000997_github_0/github_pr_approval/deployment-result" \
             -u "${SN_API_USER}:${SN_API_PASSWORD}" \
             -H "Content-Type: application/json" \
-            -d "{
-              \"shared_secret\": \"${SN_GITHUB_SHARED_SECRET}\",
-              \"repo_name\": \"${{ github.repository }}\",
-              \"pr_number\": \"${{ steps.pr_info.outputs.pr_number }}\",
-              \"approved_commit_sha\": \"${{ steps.approved_sha.outputs.approved_commit_sha }}\",
-              \"merge_commit_sha\": \"${{ github.sha }}\",
-              \"commit_sha\": \"${{ github.sha }}\",
-              \"cmdb_ci_name\": \"${CMDB_CI_NAME}\",
-              \"terraform_plan_summary\": \"${{ steps.plan_summary.outputs.terraform_plan_summary }}\",
-              \"deployment_check_status\": \"${{ steps.snow_gate.outputs.deployment_check_status }}\",
-              \"deployment_check_timestamp\": \"${{ steps.snow_gate.outputs.deployment_check_timestamp }}\",
-              \"deployment_check_result\": \"${{ steps.snow_gate.outputs.deployment_check_result }}\",
-              \"deployment_status\": \"failure\",
-              \"deployment_environment\": \"production\",
-              \"deployment_pipeline_url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
-              \"deployment_run_id\": \"${{ github.run_id }}\",
-              \"deployment_timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
-            }"
+            --data @deployment_result_payload.json
