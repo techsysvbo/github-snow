@@ -1,13 +1,3 @@
-# 7-year-old explanation:
-# When a reviewer approves the PR, GitHub checks the Terraform code again.
-# If the code is safe, GitHub sends the PR to ServiceNow.
-# If the code is not safe, GitHub does not bother ServiceNow.
-
-# Expert explanation:
-# This workflow no longer depends on finding a separate terraform-checks check run.
-# It performs its own fmt/init/validate/Checkov gate before creating snow-approval=pending
-# and posting the approval payload to ServiceNow /webhook.
-
 name: Send Approved PR to SNOW Webhook
 
 on:
@@ -33,6 +23,8 @@ env:
   SN_API_PATH: ${{ secrets.SN_API_PATH }}
   SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
 
+  CMDB_CI_NAME: ${{ vars.CMDB_CI_NAME }}
+
 jobs:
   send-to-snow-webhook:
     name: send-to-snow-webhook
@@ -42,38 +34,26 @@ jobs:
 
     steps:
       - name: Checkout repository code
-        # 7-year-old: GitHub downloads the PR code.
-        # Expert: Checkout PR head SHA, not main.
         uses: actions/checkout@v5
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Setup Terraform
-        # 7-year-old: GitHub installs Terraform.
-        # Expert: Required before fmt/init/validate.
         uses: hashicorp/setup-terraform@v3
 
       - name: Terraform format check
-        # 7-year-old: Checks if Terraform is neat.
-        # Expert: Blocks SNOW request if HCL formatting is wrong.
         working-directory: terraform/demo-s3
         run: terraform fmt -check -recursive
 
       - name: Terraform init
-        # 7-year-old: Gets Terraform ready.
-        # Expert: Initializes providers for validation and scanning.
         working-directory: terraform/demo-s3
         run: terraform init -input=false
 
       - name: Terraform validate
-        # 7-year-old: Checks if Terraform makes sense.
-        # Expert: Blocks SNOW request if Terraform is invalid.
         working-directory: terraform/demo-s3
         run: terraform validate
 
       - name: Checkov security scan
-        # 7-year-old: Checks if the AWS code is safe.
-        # Expert: Blocks SNOW request if IaC security scan fails.
         uses: bridgecrewio/checkov-action@master
         with:
           directory: terraform/demo-s3
@@ -81,27 +61,36 @@ jobs:
           quiet: true
           soft_fail: false
 
-      - name: Set SNOW approval status to pending
-        # 7-year-old: GitHub puts up a stop sign saying “waiting for SNOW.”
-        # Expert: Required branch protection context.
+      - name: Set SNOW approval and deployment gate to pending
         uses: actions/github-script@v7
         with:
           script: |
             const pr = context.payload.pull_request;
 
-            await github.rest.repos.createCommitStatus({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              sha: pr.head.sha,
-              state: "pending",
-              context: "snow-approval",
-              description: "Waiting for ServiceNow approval",
-              target_url: pr.html_url
-            });
+            const statuses = [
+              {
+                context: "snow-approval",
+                description: "Waiting for ServiceNow approval"
+              },
+              {
+                context: "snow-deployment-gate",
+                description: "Waiting for ServiceNow deployment gate validation"
+              }
+            ];
+
+            for (const status of statuses) {
+              await github.rest.repos.createCommitStatus({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                sha: pr.head.sha,
+                state: "pending",
+                context: status.context,
+                description: status.description,
+                target_url: pr.html_url
+              });
+            }
 
       - name: Send PR payload to ServiceNow webhook
-        # 7-year-old: GitHub sends the PR details to ServiceNow.
-        # Expert: Posts approved PR metadata to SNOW /webhook.
         run: |
           FULL_SN_URL="${SN_INSTANCE_URL}${SN_API_PATH}"
 
@@ -128,6 +117,7 @@ jobs:
               \"status\": \"waiting_for_snow\",
               \"approval_state\": \"requested\",
               \"status_context\": \"snow-approval\",
+              \"deployment_gate_context\": \"snow-deployment-gate\",
               \"github_check_status\": \"success\",
               \"github_checks_status\": \"PASSED\",
               \"terraform_fmt\": \"PASSED\",
@@ -137,6 +127,7 @@ jobs:
               \"pipeline_run_id\": \"${{ github.run_id }}\",
               \"pipeline_url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
               \"environment\": \"lab\",
+              \"cmdb_ci_name\": \"${CMDB_CI_NAME}\",
               \"impact_summary\": \"Lab Terraform change submitted for ServiceNow approval.\",
               \"rollback_plan\": \"Revert PR or run Terraform rollback plan if needed.\"
             }"

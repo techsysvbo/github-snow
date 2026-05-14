@@ -1,10 +1,3 @@
-# 7-year-old explanation:
-# GitHub checks the Terraform homework before anyone can merge.
-
-# Expert explanation:
-# This workflow is the PR quality/security gate.
-# The job name must stay terraform-checks because the SNOW workflow looks for it.
-
 name: Terraform PR Checks
 
 on:
@@ -27,6 +20,17 @@ env:
   AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
 
 jobs:
+  workflow-yaml-check:
+    name: workflow-yaml-check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v5
+
+      - name: Validate GitHub Actions workflow syntax
+        uses: raven-actions/actionlint@v2
+
   terraform-checks:
     name: terraform-checks
     runs-on: ubuntu-latest

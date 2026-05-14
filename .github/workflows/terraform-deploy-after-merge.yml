@@ -23,11 +23,7 @@ env:
   SN_API_PASSWORD: ${{ secrets.SN_API_PASSWORD }}
   SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
 
-  "cmdb_ci_name": "${{ env.CMDB_CI_NAME }}",
-  "terraform_plan_summary": "${{ steps.plan_summary.outputs.terraform_plan_summary }}",
-  "deployment_check_status": "${{ steps.snow_gate.outputs.deployment_check_status }}",
-  "deployment_check_timestamp": "${{ steps.snow_gate.outputs.deployment_check_timestamp }}",
-  "deployment_check_result": "${{ steps.snow_gate.outputs.deployment_check_result }}"
+  CMDB_CI_NAME: ${{ vars.CMDB_CI_NAME }}
 
 jobs:
   deploy:
@@ -42,9 +38,6 @@ jobs:
         id: pr_info
         shell: bash
         run: |
-          echo "Commit message:"
-          echo "${{ github.event.head_commit.message }}"
-
           PR_NUMBER=$(echo "${{ github.event.head_commit.message }}" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
 
           if [ -z "$PR_NUMBER" ]; then
@@ -52,7 +45,6 @@ jobs:
             exit 1
           fi
 
-          echo "Found PR number: $PR_NUMBER"
           echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
       - name: Get approved PR head SHA
@@ -67,9 +59,6 @@ jobs:
               repo: context.repo.repo,
               pull_number: prNumber
             });
-
-            core.info(`Approved PR head SHA: ${pr.head.sha}`);
-            core.info(`Merge commit SHA: ${context.sha}`);
 
             core.setOutput("approved_commit_sha", pr.head.sha);
 
@@ -87,13 +76,15 @@ jobs:
               \"approved_commit_sha\": \"${{ steps.approved_sha.outputs.approved_commit_sha }}\",
               \"merge_commit_sha\": \"${{ github.sha }}\",
               \"status_context\": \"snow-approval\",
+              \"deployment_gate_context\": \"snow-deployment-gate\",
+              \"cmdb_ci_name\": \"${CMDB_CI_NAME}\",
               \"deployment_environment\": \"production\",
               \"deployment_pipeline_url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
               \"deployment_run_id\": \"${{ github.run_id }}\"
             }")
 
-          echo "$RESPONSE"
-          printf '%s' "$RESPONSE" > snow_gate_response.json
+          echo "$RESPONSE" > snow_gate_response.json
+          cat snow_gate_response.json
 
           python3 - <<'PY'
           import json, sys, os
@@ -103,23 +94,23 @@ jobs:
 
           result = data.get("result", data)
 
-          approved = result.get("approved")
-          approval_state = result.get("approval_state")
-          sha_match = result.get("sha_match")
-          context_match = result.get("context_match")
-
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
               out.write(f"deployment_check_status={result.get('deployment_check_status', '')}\n")
               out.write(f"deployment_check_timestamp={result.get('deployment_check_timestamp', '')}\n")
               out.write(f"merge_commit_sha={result.get('merge_commit_sha', '')}\n")
-              check_result = str(result.get("deployment_check_result", "")).replace("\n", " ")
+              check_result = str(result.get("deployment_check_result", "")).replace("\n", " ").replace('"', "'")
               out.write(f"deployment_check_result={check_result}\n")
 
-          if approved is True and approval_state == "approved" and sha_match is True and context_match is True:
-              print("ServiceNow deployment-time approval validation passed.")
+          if (
+              result.get("approved") is True
+              and result.get("approval_state") == "approved"
+              and result.get("sha_match") is True
+              and result.get("context_match") is True
+          ):
+              print("ServiceNow deployment gate passed.")
               sys.exit(0)
 
-          print("ServiceNow deployment-time approval validation failed.")
+          print("ServiceNow deployment gate failed.")
           print(result)
           sys.exit(1)
           PY
@@ -149,17 +140,21 @@ jobs:
 
       - name: Terraform plan
         working-directory: terraform/demo-s3
-        run: terraform plan -input=false -no-color
+        run: terraform plan -input=false -no-color | tee terraform-plan.txt
 
-      - name: Terraform apply
-        working-directory: terraform/demo-s3
-        run: terraform apply -auto-approve -input=false
-        
       - name: Build Terraform plan summary
         id: plan_summary
         shell: bash
         run: |
-          echo "terraform_plan_summary=Terraform plan completed successfully before production apply." >> "$GITHUB_OUTPUT"
+          SUMMARY=$(grep -E "Plan:|No changes" terraform/demo-s3/terraform-plan.txt | tail -1 | sed 's/"/'\''/g')
+          if [ -z "$SUMMARY" ]; then
+            SUMMARY="Terraform plan completed before production apply."
+          fi
+          echo "terraform_plan_summary=$SUMMARY" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform apply
+        working-directory: terraform/demo-s3
+        run: terraform apply -auto-approve -input=false
 
       - name: Notify ServiceNow deployment success
         if: success()
@@ -174,6 +169,8 @@ jobs:
               \"approved_commit_sha\": \"${{ steps.approved_sha.outputs.approved_commit_sha }}\",
               \"merge_commit_sha\": \"${{ github.sha }}\",
               \"commit_sha\": \"${{ github.sha }}\",
+              \"cmdb_ci_name\": \"${CMDB_CI_NAME}\",
+              \"terraform_plan_summary\": \"${{ steps.plan_summary.outputs.terraform_plan_summary }}\",
               \"deployment_check_status\": \"${{ steps.snow_gate.outputs.deployment_check_status }}\",
               \"deployment_check_timestamp\": \"${{ steps.snow_gate.outputs.deployment_check_timestamp }}\",
               \"deployment_check_result\": \"${{ steps.snow_gate.outputs.deployment_check_result }}\",
@@ -197,6 +194,8 @@ jobs:
               \"approved_commit_sha\": \"${{ steps.approved_sha.outputs.approved_commit_sha }}\",
               \"merge_commit_sha\": \"${{ github.sha }}\",
               \"commit_sha\": \"${{ github.sha }}\",
+              \"cmdb_ci_name\": \"${CMDB_CI_NAME}\",
+              \"terraform_plan_summary\": \"${{ steps.plan_summary.outputs.terraform_plan_summary }}\",
               \"deployment_check_status\": \"${{ steps.snow_gate.outputs.deployment_check_status }}\",
               \"deployment_check_timestamp\": \"${{ steps.snow_gate.outputs.deployment_check_timestamp }}\",
               \"deployment_check_result\": \"${{ steps.snow_gate.outputs.deployment_check_result }}\",
@@ -205,4 +204,4 @@ jobs:
               \"deployment_pipeline_url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
               \"deployment_run_id\": \"${{ github.run_id }}\",
               \"deployment_timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
-            }" 
+            }"
