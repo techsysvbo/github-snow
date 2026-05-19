@@ -1,4 +1,4 @@
-name: Send Approved PR to SNOW Webhook
+name: Send Approved PR to SNOW
 
 on:
   pull_request_review:
@@ -20,20 +20,18 @@ env:
   SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
   SN_API_USER: ${{ secrets.SN_API_USER }}
   SN_API_PASSWORD: ${{ secrets.SN_API_PASSWORD }}
-  SN_API_PATH: ${{ secrets.SN_API_PATH }}
   SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
-
   CMDB_CI_NAME: ${{ vars.CMDB_CI_NAME }}
 
 jobs:
-  send-to-snow-webhook:
-    name: send-to-snow-webhook
+  send-approved-pr-to-snow:
+    name: send-approved-pr-to-snow
     runs-on: ubuntu-latest
 
     if: github.event.review.state == 'approved' && github.event.pull_request.base.ref == 'main'
 
     steps:
-      - name: Checkout repository code
+      - name: Checkout PR code
         uses: actions/checkout@v5
         with:
           ref: ${{ github.event.pull_request.head.sha }}
@@ -74,23 +72,23 @@ jobs:
               },
               {
                 context: "snow-deployment-gate",
-                description: "Waiting for ServiceNow deployment gate validation"
+                description: "Waiting for ServiceNow deployment gate approval"
               }
             ];
 
-            for (const status of statuses) {
+            for (const item of statuses) {
               await github.rest.repos.createCommitStatus({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 sha: pr.head.sha,
                 state: "pending",
-                context: status.context,
-                description: status.description,
+                context: item.context,
+                description: item.description,
                 target_url: pr.html_url
               });
             }
 
-      - name: Send PR payload to ServiceNow webhook
+      - name: Build and send SNOW PR payload
         env:
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
@@ -141,15 +139,15 @@ jobs:
               "pipeline_url": f'{os.environ["SERVER_URL"]}/{os.environ["REPO_NAME"]}/actions/runs/{os.environ["RUN_ID"]}',
               "environment": "lab",
               "cmdb_ci_name": os.environ.get("CMDB_CI_NAME", ""),
-              "impact_summary": "Lab Terraform change submitted for ServiceNow approval.",
-              "rollback_plan": "Revert PR or run Terraform rollback plan if needed."
+              "impact_summary": "Terraform change submitted for ServiceNow approval before merge.",
+              "rollback_plan": "If rejected, do not merge. If deployed later, revert PR or run Terraform rollback."
           }
 
-          with open("snow_payload.json", "w") as f:
+          with open("snow_pr_payload.json", "w") as f:
               json.dump(payload, f)
           PY
 
-          curl -sS -X POST "${SN_INSTANCE_URL}${SN_API_PATH}" \
+          curl -sS -X POST "${SN_INSTANCE_URL}/api/x_2000997_github_0/github_pr_approval/webhook" \
             -u "${SN_API_USER}:${SN_API_PASSWORD}" \
             -H "Content-Type: application/json" \
-            --data @snow_payload.json
+            --data @snow_pr_payload.json

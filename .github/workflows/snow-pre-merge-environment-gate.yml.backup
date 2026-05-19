@@ -1,0 +1,35 @@
+# 7-year-old:
+# This is the locked door before merge.
+# GitHub pauses here and waits for ServiceNow to say yes.
+
+# SME:
+# This job targets a GitHub protected environment.
+# The enabled GitHub App custom protection rule must approve the job.
+# Branch protection requires this job before merge.
+
+name: SNOW Pre-Merge Environment Gate
+
+on:
+  pull_request_review:
+    types:
+      - submitted
+
+permissions:
+  contents: read
+  pull-requests: read
+  deployments: write
+
+jobs:
+  snow-pre-merge-environment-gate:
+    name: snow-pre-merge-environment-gate
+    if: github.event.review.state == 'approved' && github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+
+    environment:
+      name: snow-pre-merge-approval
+
+    steps:
+      - name: SNOW environment gate approved
+        run: |
+          echo "ServiceNow approved the GitHub protected environment gate."
+          echo "This pre-merge job can now complete."
