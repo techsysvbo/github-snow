@@ -19,7 +19,7 @@ env:
 jobs:
   workflow-yaml-check:
     name: workflow-yaml-check
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Validate GitHub Actions YAML
@@ -27,7 +27,7 @@ jobs:
 
   terraform-checks:
     name: terraform-checks
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false

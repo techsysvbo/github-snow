@@ -27,9 +27,7 @@ env:
 jobs:
   terraform-deploy:
     name: terraform-deploy
-    runs-on:
-      - self-hosted
-      - linux
+    runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false

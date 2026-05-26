@@ -13,7 +13,7 @@ permissions:
 jobs:
   reset-snow-gates:
     name: snow-approval
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
 
     steps:
       - name: Set SNOW approval to pending

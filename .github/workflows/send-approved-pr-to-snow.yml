@@ -21,7 +21,7 @@ env:
 jobs:
   send-approved-pr-to-snow:
     name: send-approved-pr-to-snow
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
 
     if: github.event.review.state == 'approved' && github.event.pull_request.base.ref == 'main'
 
