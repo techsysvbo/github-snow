@@ -21,7 +21,7 @@ jobs:
     name: workflow-yaml-check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Validate GitHub Actions YAML
         uses: raven-actions/actionlint@v2
 
@@ -41,7 +41,7 @@ jobs:
         working-directory: ${{ matrix.module }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: hashicorp/setup-terraform@v3
 
