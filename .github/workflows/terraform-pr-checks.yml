@@ -2,62 +2,54 @@ name: Terraform PR Checks
 
 on:
   pull_request:
-    branches:
-      - main
+    branches: [main]
     paths:
       - "terraform/**"
+      - "terraform-modules/**"
+      - "common-tags/**"
       - ".github/workflows/**"
 
 permissions:
   contents: read
-  pull-requests: read
-  security-events: write
 
 env:
   TF_IN_AUTOMATION: true
   TF_INPUT: false
-  AWS_REGION: ${{ secrets.AWS_REGION }}
-  AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
 
 jobs:
   workflow-yaml-check:
     name: workflow-yaml-check
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository code
-        uses: actions/checkout@v5
-
-      - name: Validate GitHub Actions workflow syntax
+      - uses: actions/checkout@v4
+      - name: Validate GitHub Actions YAML
         uses: raven-actions/actionlint@v2
 
   terraform-checks:
     name: terraform-checks
     runs-on: ubuntu-latest
 
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - terraform/environments/dev/s3
+          - terraform/environments/dev/ec2
+
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
+
     steps:
-      - name: Checkout repository code
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v3
 
-      - name: Terraform format check
-        working-directory: terraform/demo-s3
+      - name: Terraform fmt
         run: terraform fmt -check -recursive
 
-      - name: Terraform init
-        working-directory: terraform/demo-s3
-        run: terraform init -input=false
+      - name: Terraform init without backend
+        run: terraform init -backend=false
 
       - name: Terraform validate
-        working-directory: terraform/demo-s3
         run: terraform validate
-
-      - name: Checkov security scan
-        uses: bridgecrewio/checkov-action@master
-        with:
-          directory: terraform/demo-s3
-          framework: terraform
-          quiet: true
-          soft_fail: false

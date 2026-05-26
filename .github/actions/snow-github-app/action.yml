@@ -1,0 +1,48 @@
+#  7-year-old explanation:
+# This is a special robot that GitHub can call when it needs to ask ServiceNow for permission.
+# It waits for ServiceNow to say "yes" or "no" before letting the code merge.
+# Think of it like a security guard who checks with the boss before letting someone enter.
+
+#  SME explanation:
+# This GitHub Action implements a custom deployment protection rule as a composite action.
+# It receives deployment_protection_rule webhook events, creates ServiceNow approval records,
+# and polls/wait for approval status before approving/rejecting the GitHub environment gate.
+# This eliminates the need for external hosting (EC2/Lambda) and reduces operational overhead.
+
+# .github/actions/snow-github-app/action.yml
+name: 'Snow GitHub App Action'
+description: 'GitHub Action that implements ServiceNow approval gate'
+
+inputs:
+  gh-app-id:
+    description: 'GitHub App ID'
+    required: true
+  gh-app-private-key:
+    description: 'GitHub App Private Key'
+    required: true
+  gh-webhook-secret:
+    description: 'GitHub Webhook Secret'
+    required: true
+  sn-instance-url:
+    description: 'ServiceNow Instance URL'
+    required: true
+  sn-api-user:
+    description: 'ServiceNow API User'
+    required: true
+  sn-api-password:
+    description: 'ServiceNow API Password'
+    required: true
+  sn-api-path:
+    description: 'ServiceNow API Path'
+    required: true
+  sn-shared-secret:
+    description: 'Shared secret for webhook validation'
+    required: true
+
+runs:
+  using: 'node20'
+  main: 'index.js'  # Use source directly instead of dist/index.js
+
+branding:
+  icon: 'check-circle'
+  color: 'green'

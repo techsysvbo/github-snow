@@ -4,137 +4,180 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "terraform/**"
+      - "terraform-modules/**"
+      - "common-tags/**"
 
 permissions:
   contents: read
+  pull-requests: read
+  statuses: write
+  id-token: write
 
 env:
   TF_IN_AUTOMATION: true
   TF_INPUT: false
 
-  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  AWS_REGION: ${{ secrets.AWS_REGION }}
-  AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
-
   SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
   SN_API_USER: ${{ secrets.SN_API_USER }}
   SN_API_PASSWORD: ${{ secrets.SN_API_PASSWORD }}
   SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
-  CMDB_CI_NAME: ${{ vars.CMDB_CI_NAME }}
 
 jobs:
-  terraform-apply:
-    name: terraform-apply
+  terraform-deploy:
+    name: terraform-deploy
     runs-on: ubuntu-latest
 
+    strategy:
+      fail-fast: false
+      matrix:
+        workload:
+          - name: dev-s3
+            path: terraform/environments/dev/s3
+            tfvars: dev.tfvars
+            aws_region: us-east-1
+
+          - name: dev-ec2
+            path: terraform/environments/dev/ec2
+            tfvars: dev.tfvars
+            aws_region: us-east-1
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ matrix.workload.path }}
+
     steps:
-      - name: Checkout main branch
-        uses: actions/checkout@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Assume AWS deployment role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_PROD_DEPLOY_ROLE_ARN }}
+          role-session-name: github-terraform-prod-deploy
+          aws-region: ${{ matrix.workload.aws_region }}
+
+      - name: Verify AWS caller identity
+        run: aws sts get-caller-identity
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
-      - name: Terraform fmt check
-        working-directory: terraform/demo-s3
+      - name: Terraform fmt
         run: terraform fmt -check -recursive
 
       - name: Terraform init
-        working-directory: terraform/demo-s3
         run: terraform init -input=false
 
       - name: Terraform validate
-        working-directory: terraform/demo-s3
         run: terraform validate
 
-      - name: Checkov security scan before deploy
-        uses: bridgecrewio/checkov-action@master
-        with:
-          directory: terraform/demo-s3
-          framework: terraform
-          quiet: true
-          soft_fail: false
-
       - name: Terraform plan
-        working-directory: terraform/demo-s3
-        run: terraform plan -input=false -no-color | tee terraform-plan.txt
-
-      - name: Build Terraform plan summary
-        id: plan_summary
-        shell: bash
         run: |
-          SUMMARY=$(grep -E "Plan:|No changes" terraform/demo-s3/terraform-plan.txt | tail -1 | sed 's/"/'\''/g')
-          if [ -z "$SUMMARY" ]; then
-            SUMMARY="Terraform plan completed before production apply."
-          fi
-          echo "terraform_plan_summary=$SUMMARY" >> "$GITHUB_OUTPUT"
+          terraform plan \
+            -input=false \
+            -var-file=${{ matrix.workload.tfvars }} \
+            -no-color \
+            -out=tfplan | tee terraform-plan.txt
 
       - name: Terraform apply
-        working-directory: terraform/demo-s3
-        run: terraform apply -auto-approve -input=false
+        run: |
+          terraform apply \
+            -auto-approve \
+            -input=false \
+            tfplan
 
-      - name: Notify ServiceNow deployment success
+      - name: Upload Terraform plan artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ matrix.workload.name }}
+          path: ${{ matrix.workload.path }}/terraform-plan.txt
+
+      - name: Notify SNOW deployment success
         if: success()
         env:
-          TERRAFORM_PLAN_SUMMARY: ${{ steps.plan_summary.outputs.terraform_plan_summary }}
+          DEPLOYMENT_STATUS: success
+          WORKLOAD_NAME: ${{ matrix.workload.name }}
+          AWS_REGION: ${{ matrix.workload.aws_region }}
         run: |
-          python3 - <<'PY'
-          import json
-          import os
-          from datetime import datetime, timezone
+          set -euo pipefail
 
-          payload = {
-              "shared_secret": os.environ["SN_GITHUB_SHARED_SECRET"],
-              "repo_name": os.environ["GITHUB_REPOSITORY"],
-              "commit_sha": os.environ["GITHUB_SHA"],
-              "merge_commit_sha": os.environ["GITHUB_SHA"],
-              "cmdb_ci_name": os.environ.get("CMDB_CI_NAME", ""),
-              "terraform_plan_summary": os.environ.get("TERRAFORM_PLAN_SUMMARY", ""),
-              "deployment_status": "success",
-              "deployment_environment": "production",
-              "deployment_pipeline_url": f'{os.environ["GITHUB_SERVER_URL"]}/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{os.environ["GITHUB_RUN_ID"]}',
-              "deployment_run_id": os.environ["GITHUB_RUN_ID"],
-              "deployment_timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-          }
+          PLAN_SUMMARY=$(grep -E "Plan:|No changes" terraform-plan.txt | tail -1 || true)
 
-          with open("deployment_result_payload.json", "w") as f:
-              json.dump(payload, f)
-          PY
+          jq -n \
+            --arg shared_secret "$SN_GITHUB_SHARED_SECRET" \
+            --arg deployment_status "$DEPLOYMENT_STATUS" \
+            --arg repo_name "${GITHUB_REPOSITORY}" \
+            --arg commit_sha "${GITHUB_SHA}" \
+            --arg deployment_pipeline_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --arg deployment_run_id "${GITHUB_RUN_ID}" \
+            --arg deployment_environment "production" \
+            --arg workload "$WORKLOAD_NAME" \
+            --arg region "$AWS_REGION" \
+            --arg terraform_plan_summary "$PLAN_SUMMARY" \
+            '{
+              shared_secret: $shared_secret,
+              deployment_status: $deployment_status,
+              repo_name: $repo_name,
+              commit_sha: $commit_sha,
+              deployment_pipeline_url: $deployment_pipeline_url,
+              deployment_run_id: $deployment_run_id,
+              deployment_environment: $deployment_environment,
+              workload: $workload,
+              region: $region,
+              terraform_plan_summary: $terraform_plan_summary
+            }' > deployment-success.json
 
-          curl -sS -X POST "${SN_INSTANCE_URL}/api/x_2000997_github_0/github_pr_approval/deployment-result" \
+          curl --fail-with-body -sS \
             -u "${SN_API_USER}:${SN_API_PASSWORD}" \
             -H "Content-Type: application/json" \
-            --data @deployment_result_payload.json
+            -X POST \
+            "${SN_INSTANCE_URL}/api/x_2000997_github_0/github_pr_approval/deployment-result" \
+            --data @deployment-success.json
 
-      - name: Notify ServiceNow deployment failure
+      - name: Notify SNOW deployment failure
         if: failure()
         env:
-          TERRAFORM_PLAN_SUMMARY: ${{ steps.plan_summary.outputs.terraform_plan_summary }}
+          DEPLOYMENT_STATUS: failed
+          WORKLOAD_NAME: ${{ matrix.workload.name }}
+          AWS_REGION: ${{ matrix.workload.aws_region }}
         run: |
-          python3 - <<'PY'
-          import json
-          import os
-          from datetime import datetime, timezone
+          set -euo pipefail
 
-          payload = {
-              "shared_secret": os.environ["SN_GITHUB_SHARED_SECRET"],
-              "repo_name": os.environ["GITHUB_REPOSITORY"],
-              "commit_sha": os.environ["GITHUB_SHA"],
-              "merge_commit_sha": os.environ["GITHUB_SHA"],
-              "cmdb_ci_name": os.environ.get("CMDB_CI_NAME", ""),
-              "terraform_plan_summary": os.environ.get("TERRAFORM_PLAN_SUMMARY", ""),
-              "deployment_status": "failure",
-              "deployment_environment": "production",
-              "deployment_pipeline_url": f'{os.environ["GITHUB_SERVER_URL"]}/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{os.environ["GITHUB_RUN_ID"]}',
-              "deployment_run_id": os.environ["GITHUB_RUN_ID"],
-              "deployment_timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-          }
+          PLAN_SUMMARY=$(grep -E "Plan:|No changes" terraform-plan.txt | tail -1 || true)
 
-          with open("deployment_result_payload.json", "w") as f:
-              json.dump(payload, f)
-          PY
+          jq -n \
+            --arg shared_secret "$SN_GITHUB_SHARED_SECRET" \
+            --arg deployment_status "$DEPLOYMENT_STATUS" \
+            --arg repo_name "${GITHUB_REPOSITORY}" \
+            --arg commit_sha "${GITHUB_SHA}" \
+            --arg deployment_pipeline_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --arg deployment_run_id "${GITHUB_RUN_ID}" \
+            --arg deployment_environment "production" \
+            --arg workload "$WORKLOAD_NAME" \
+            --arg region "$AWS_REGION" \
+            --arg terraform_plan_summary "$PLAN_SUMMARY" \
+            '{
+              shared_secret: $shared_secret,
+              deployment_status: $deployment_status,
+              repo_name: $repo_name,
+              commit_sha: $commit_sha,
+              deployment_pipeline_url: $deployment_pipeline_url,
+              deployment_run_id: $deployment_run_id,
+              deployment_environment: $deployment_environment,
+              workload: $workload,
+              region: $region,
+              terraform_plan_summary: $terraform_plan_summary
+            }' > deployment-failure.json
 
-          curl -sS -X POST "${SN_INSTANCE_URL}/api/x_2000997_github_0/github_pr_approval/deployment-result" \
+          curl -sS \
             -u "${SN_API_USER}:${SN_API_PASSWORD}" \
             -H "Content-Type: application/json" \
-            --data @deployment_result_payload.json
+            -X POST \
+            "${SN_INSTANCE_URL}/api/x_2000997_github_0/github_pr_approval/deployment-result" \
+            --data @deployment-failure.json

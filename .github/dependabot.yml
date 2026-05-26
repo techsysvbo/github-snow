@@ -1,0 +1,62 @@
+# 🧒 7-year-old explanation:
+# This is like a robot that checks if any of our building blocks are old and have problems.
+# Every week, it looks for new versions of our tools and makes a pull request to update them.
+
+# 🎯 SME explanation:
+# Automates dependency updates for security patches and version upgrades.
+# Groups related updates to reduce PR noise and ensures all dependencies are current.
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      actions-minor:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+      - "security"
+
+  - package-ecosystem: "npm"
+    directory: "/.github/actions/snow-github-app"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      npm-production:
+        dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
+      npm-development:
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "fix"
+      prefix-development: "chore"
+    labels:
+      - "dependencies"
+      - "javascript"
+    versioning-strategy: "auto"
+    allow:
+      - dependency-type: "all"
+
+  - package-ecosystem: "terraform"
+    directory: "/terraform/demo-s3"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "terraform"
