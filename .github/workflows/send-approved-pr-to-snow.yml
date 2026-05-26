@@ -2,21 +2,16 @@ name: Send Approved PR to SNOW
 
 on:
   pull_request_review:
-    types:
-      - submitted
+    types: [submitted]
 
 permissions:
   contents: read
   pull-requests: read
-  statuses: write
-  security-events: write
+  issues: read
+  statuses: read
+  actions: read
 
 env:
-  TF_IN_AUTOMATION: true
-  TF_INPUT: false
-  AWS_REGION: ${{ secrets.AWS_REGION }}
-  AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
-
   SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
   SN_API_USER: ${{ secrets.SN_API_USER }}
   SN_API_PASSWORD: ${{ secrets.SN_API_PASSWORD }}
@@ -26,73 +21,21 @@ env:
 jobs:
   send-approved-pr-to-snow:
     name: send-approved-pr-to-snow
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
 
     if: github.event.review.state == 'approved' && github.event.pull_request.base.ref == 'main'
 
     steps:
-      - name: Checkout PR code
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-
-      - name: Terraform format check
-        working-directory: terraform/demo-s3
-        run: terraform fmt -check -recursive
-
-      - name: Terraform init
-        working-directory: terraform/demo-s3
-        run: terraform init -input=false
-
-      - name: Terraform validate
-        working-directory: terraform/demo-s3
-        run: terraform validate
-
-      - name: Checkov security scan
-        uses: bridgecrewio/checkov-action@master
-        with:
-          directory: terraform/demo-s3
-          framework: terraform
-          quiet: true
-          soft_fail: false
-
-      - name: Set SNOW approval and deployment gate to pending
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const pr = context.payload.pull_request;
-
-            const statuses = [
-              {
-                context: "snow-approval",
-                description: "Waiting for ServiceNow approval"
-              },
-              {
-                context: "snow-deployment-gate",
-                description: "Waiting for ServiceNow deployment gate approval"
-              }
-            ];
-
-            for (const item of statuses) {
-              await github.rest.repos.createCommitStatus({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                sha: pr.head.sha,
-                state: "pending",
-                context: item.context,
-                description: item.description,
-                target_url: pr.html_url
-              });
-            }
-
-      - name: Build and send SNOW PR payload
+      - name: Get PR metadata and send to SNOW
         env:
+          GH_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
-          REPO_NAME: ${{ github.repository }}
+          REPO_FULL: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR_TITLE: ${{ github.event.pull_request.title }}
@@ -100,54 +43,127 @@ jobs:
           TARGET_BRANCH: ${{ github.event.pull_request.base.ref }}
           COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
           REQUESTER: ${{ github.event.pull_request.user.login }}
-          REVIEWER: ${{ github.event.review.user.login }}
           RUN_ID: ${{ github.run_id }}
           SERVER_URL: ${{ github.server_url }}
         run: |
-          python3 - <<'PY'
-          import json
-          import os
+          set -euo pipefail
 
-          payload = {
-              "shared_secret": os.environ["SN_GITHUB_SHARED_SECRET"],
-              "event_type": "pull_request_review_approved",
-              "owner": os.environ["OWNER"],
-              "repo": os.environ["REPO"],
-              "repo_name": os.environ["REPO_NAME"],
-              "pr_number": os.environ["PR_NUMBER"],
-              "pr_url": os.environ["PR_URL"],
-              "pr_link": os.environ["PR_URL"],
-              "pr_title": os.environ["PR_TITLE"],
-              "source_branch": os.environ["SOURCE_BRANCH"],
-              "target_branch": os.environ["TARGET_BRANCH"],
-              "commit_sha": os.environ["COMMIT_SHA"],
-              "requester": os.environ["REQUESTER"],
-              "requestor_github_username": os.environ["REQUESTER"],
-              "approvers": [os.environ["REVIEWER"]],
-              "sme_approval_1": os.environ["REVIEWER"],
-              "status": "waiting_for_snow",
-              "approval_state": "requested",
-              "status_context": "snow-approval",
-              "deployment_gate_context": "snow-deployment-gate",
-              "github_check_status": "success",
-              "github_checks_status": "PASSED",
-              "terraform_fmt": "PASSED",
-              "terraform_validate": "PASSED",
-              "checkov_scan_result": "PASSED",
-              "security_scan_result": "PASSED",
-              "pipeline_run_id": os.environ["RUN_ID"],
-              "pipeline_url": f'{os.environ["SERVER_URL"]}/{os.environ["REPO_NAME"]}/actions/runs/{os.environ["RUN_ID"]}',
-              "environment": "lab",
-              "cmdb_ci_name": os.environ.get("CMDB_CI_NAME", ""),
-              "impact_summary": "Terraform change submitted for ServiceNow approval before merge.",
-              "rollback_plan": "If rejected, do not merge. If deployed later, revert PR or run Terraform rollback."
-          }
+          echo "Reading PR comments to find engineer email..."
+          COMMENTS=$(curl -sS \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${OWNER}/${REPO}/issues/${PR_NUMBER}/comments")
 
-          with open("snow_pr_payload.json", "w") as f:
-              json.dump(payload, f)
-          PY
+          ENGINEER_EMAIL=$(echo "$COMMENTS" | jq -r '
+            [ .[].body
+              | select(test("\"snow_metadata\""))
+              | fromjson?
+              | select(.snow_metadata == true)
+              | .engineer_email
+            ] | last // empty
+          ')
 
-          curl -sS -X POST "${SN_INSTANCE_URL}/api/x_2000997_github_0/github_pr_approval/webhook" \
+          echo "Reading PR reviews..."
+          REVIEWS=$(curl -sS \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/reviews")
+
+          APPROVERS=$(echo "$REVIEWS" | jq -c '[.[] | select(.state == "APPROVED") | .user.login] | unique')
+          APPROVER_COUNT=$(echo "$APPROVERS" | jq 'length')
+
+          if [ "$APPROVER_COUNT" -lt 2 ]; then
+            echo "Need 2 approvals before sending to SNOW. Current approvals: ${APPROVER_COUNT}"
+            exit 0
+          fi
+
+          echo "Reading GitHub combined status..."
+          STATUS_JSON=$(curl -sS \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${OWNER}/${REPO}/commits/${COMMIT_SHA}/status")
+
+          CHECKOV_STATE=$(echo "$STATUS_JSON" | jq -r '.statuses[]? | select(.context=="checkov") | .state' | head -1)
+          TF_STATE=$(echo "$STATUS_JSON" | jq -r '.statuses[]? | select(.context=="terraform-checks") | .state' | head -1)
+          CODEQL_STATE=$(echo "$STATUS_JSON" | jq -r '.statuses[]? | select(.context=="codeql") | .state' | head -1)
+          GITLEAKS_STATE=$(echo "$STATUS_JSON" | jq -r '.statuses[]? | select(.context=="gitleaks") | .state' | head -1)
+
+          CHECKOV_RESULT=$([ "$CHECKOV_STATE" = "success" ] && echo "PASSED" || echo "FAILED_OR_PENDING")
+          TF_RESULT=$([ "$TF_STATE" = "success" ] && echo "PASSED" || echo "FAILED_OR_PENDING")
+          CODEQL_RESULT=$([ "$CODEQL_STATE" = "success" ] && echo "PASSED" || echo "FAILED_OR_PENDING")
+          GITLEAKS_RESULT=$([ "$GITLEAKS_STATE" = "success" ] && echo "PASSED" || echo "FAILED_OR_PENDING")
+
+          if [ "$CHECKOV_RESULT" != "PASSED" ] || [ "$TF_RESULT" != "PASSED" ] || [ "$CODEQL_RESULT" != "PASSED" ] || [ "$GITLEAKS_RESULT" != "PASSED" ]; then
+            echo "Security/validation checks are not all green. Not sending to SNOW yet."
+            exit 0
+          fi
+
+          jq -n \
+            --arg shared_secret "$SN_GITHUB_SHARED_SECRET" \
+            --arg event_type "pull_request_ready_for_snow_approval" \
+            --arg owner "$OWNER" \
+            --arg repo "$REPO" \
+            --arg repo_name "$REPO_FULL" \
+            --arg pr_number "$PR_NUMBER" \
+            --arg pr_link "$PR_URL" \
+            --arg pr_title "$PR_TITLE" \
+            --arg source_branch "$SOURCE_BRANCH" \
+            --arg target_branch "$TARGET_BRANCH" \
+            --arg commit_sha "$COMMIT_SHA" \
+            --arg requester "$REQUESTER" \
+            --arg engineer_email "$ENGINEER_EMAIL" \
+            --arg status_context "snow-approval" \
+            --arg github_check_status "success" \
+            --arg terraform_validate "$TF_RESULT" \
+            --arg checkov_scan_result "$CHECKOV_RESULT" \
+            --arg codeql_scan_result "$CODEQL_RESULT" \
+            --arg gitleaks_scan_result "$GITLEAKS_RESULT" \
+            --arg pipeline_run_id "$RUN_ID" \
+            --arg pipeline_url "${SERVER_URL}/${REPO_FULL}/actions/runs/${RUN_ID}" \
+            --arg environment "production" \
+            --arg cmdb_ci_name "$CMDB_CI_NAME" \
+            --arg impact_summary "Production-bound Terraform module change submitted for CCoE approval in ServiceNow." \
+            --arg rollback_plan "If rejected, do not merge. If deployed and rollback is required, revert the PR or apply the previous known-good Terraform module version." \
+            --argjson approvers "$APPROVERS" \
+            '{
+              shared_secret: $shared_secret,
+              event_type: $event_type,
+              owner: $owner,
+              repo: $repo,
+              repo_name: $repo_name,
+              pr_number: ($pr_number | tonumber),
+              pr_link: $pr_link,
+              pr_title: $pr_title,
+              source_branch: $source_branch,
+              target_branch: $target_branch,
+              commit_sha: $commit_sha,
+              requester: $requester,
+              requestor_github_username: $requester,
+              requestor_email: $engineer_email,
+              approvers: $approvers,
+              status: "waiting_for_snow",
+              approval_state: "requested",
+              status_context: $status_context,
+              github_check_status: $github_check_status,
+              terraform_validate: $terraform_validate,
+              checkov_scan_result: $checkov_scan_result,
+              codeql_scan_result: $codeql_scan_result,
+              gitleaks_scan_result: $gitleaks_scan_result,
+              pipeline_run_id: $pipeline_run_id,
+              pipeline_url: $pipeline_url,
+              environment: $environment,
+              cmdb_ci_name: $cmdb_ci_name,
+              impact_summary: $impact_summary,
+              rollback_plan: $rollback_plan
+            }
+            | with_entries(select(.value != null and .value != "" and .value != []))' > snow_pr_payload.json
+
+          echo "Payload preview without secret:"
+          jq '.shared_secret="****"' snow_pr_payload.json
+
+          curl --fail-with-body -sS \
             -u "${SN_API_USER}:${SN_API_PASSWORD}" \
             -H "Content-Type: application/json" \
+            -X POST \
+            "${SN_INSTANCE_URL}/api/x_2000997_github_0/github_pr_approval/webhook" \
             --data @snow_pr_payload.json

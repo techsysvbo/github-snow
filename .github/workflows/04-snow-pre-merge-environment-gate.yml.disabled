@@ -1,0 +1,81 @@
+# 🧒 7-year-old explanation:
+# This is the security checkpoint before any code can be merged.
+# It creates a special "environment" that needs permission from ServiceNow.
+# The robot we built earlier handles asking ServiceNow for permission.
+
+# 🎯 SME explanation:
+# This workflow targets a protected GitHub Environment that has a custom deployment
+# protection rule. The environment pauses the job and calls our GitHub Action.
+# The action implements the ServiceNow approval logic. The workflow only continues
+# after the environment protection rule approves the deployment.
+
+name: SNOW Pre-Merge Environment Gate
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: read
+  pull-requests: read
+  deployments: write
+  statuses: write
+  actions: read
+
+env:
+  SNOW_ENVIRONMENT_NAME: snow-pre-merge-approval
+
+jobs:
+  snow-pre-merge-environment-gate:
+    name: snow-pre-merge-environment-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # Only run when PR is approved and targeting main
+    if: |
+      github.event.review.state == 'approved' && 
+      github.event.pull_request.base.ref == 'main'
+
+    environment:
+      name: snow-pre-merge-approval
+
+    steps:
+      - name: 📥 Checkout PR code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: 🏷️ Mark snow-approval pending
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: pr.head.sha,
+              state: "pending",
+              context: "snow-approval",
+              description: "Waiting for ServiceNow approval before merge",
+              target_url: pr.html_url
+            });
+            
+            core.info(`Set snow-approval status to pending for ${pr.head.sha}`);
+
+      - name: 🤖 Run SNOW GitHub App Action
+        uses: ./.github/actions/snow-github-app
+        with:
+          gh-app-id: ${{ secrets.GH_APP_ID }}
+          gh-app-private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          gh-webhook-secret: ${{ secrets.GH_APP_WEBHOOK_SECRET }}
+          sn-instance-url: ${{ secrets.SN_INSTANCE_URL }}
+          sn-api-user: ${{ secrets.SN_API_USER }}
+          sn-api-password: ${{ secrets.SN_API_PASSWORD }}
+          sn-api-path: ${{ secrets.SN_API_PATH }}
+          sn-shared-secret: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
+
+      - name: ✅ Confirm SNOW environment gate passed
+        run: |
+          echo "✅ ServiceNow protected environment gate passed."
+          echo "This PR can proceed only if branch protection also sees snow-approval=success."
