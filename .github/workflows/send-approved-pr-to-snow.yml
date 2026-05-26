@@ -8,7 +8,7 @@ permissions:
   contents: read
   pull-requests: read
   issues: read
-  statuses: read
+  checks: read
   actions: read
 
 env:
@@ -26,7 +26,8 @@ jobs:
     if: github.event.review.state == 'approved' && github.event.pull_request.base.ref == 'main'
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout PR code
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
@@ -72,26 +73,34 @@ jobs:
           APPROVERS=$(echo "$REVIEWS" | jq -c '[.[] | select(.state == "APPROVED") | .user.login] | unique')
           APPROVER_COUNT=$(echo "$APPROVERS" | jq 'length')
 
+          echo "Approver count: ${APPROVER_COUNT}"
+          echo "Approvers: ${APPROVERS}"
+
           if [ "$APPROVER_COUNT" -lt 2 ]; then
             echo "Need 2 approvals before sending to SNOW. Current approvals: ${APPROVER_COUNT}"
             exit 0
           fi
 
-          echo "Reading GitHub combined status..."
-          STATUS_JSON=$(curl -sS \
+          echo "Reading GitHub check runs..."
+          CHECK_RUNS=$(curl -sS \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${OWNER}/${REPO}/commits/${COMMIT_SHA}/status")
+            "https://api.github.com/repos/${OWNER}/${REPO}/commits/${COMMIT_SHA}/check-runs")
 
-          CHECKOV_STATE=$(echo "$STATUS_JSON" | jq -r '.statuses[]? | select(.context=="checkov") | .state' | head -1)
-          TF_STATE=$(echo "$STATUS_JSON" | jq -r '.statuses[]? | select(.context=="terraform-checks") | .state' | head -1)
-          CODEQL_STATE=$(echo "$STATUS_JSON" | jq -r '.statuses[]? | select(.context=="codeql") | .state' | head -1)
-          GITLEAKS_STATE=$(echo "$STATUS_JSON" | jq -r '.statuses[]? | select(.context=="gitleaks") | .state' | head -1)
+          CHECKOV_STATE=$(echo "$CHECK_RUNS" | jq -r '.check_runs[]? | select(.name=="checkov") | .conclusion' | head -1)
+          TF_STATE=$(echo "$CHECK_RUNS" | jq -r '.check_runs[]? | select(.name=="terraform-checks") | .conclusion' | head -1)
+          CODEQL_STATE=$(echo "$CHECK_RUNS" | jq -r '.check_runs[]? | select(.name=="codeql") | .conclusion' | head -1)
+          GITLEAKS_STATE=$(echo "$CHECK_RUNS" | jq -r '.check_runs[]? | select(.name=="gitleaks") | .conclusion' | head -1)
 
           CHECKOV_RESULT=$([ "$CHECKOV_STATE" = "success" ] && echo "PASSED" || echo "FAILED_OR_PENDING")
           TF_RESULT=$([ "$TF_STATE" = "success" ] && echo "PASSED" || echo "FAILED_OR_PENDING")
           CODEQL_RESULT=$([ "$CODEQL_STATE" = "success" ] && echo "PASSED" || echo "FAILED_OR_PENDING")
           GITLEAKS_RESULT=$([ "$GITLEAKS_STATE" = "success" ] && echo "PASSED" || echo "FAILED_OR_PENDING")
+
+          echo "checkov=$CHECKOV_RESULT"
+          echo "terraform=$TF_RESULT"
+          echo "codeql=$CODEQL_RESULT"
+          echo "gitleaks=$GITLEAKS_RESULT"
 
           if [ "$CHECKOV_RESULT" != "PASSED" ] || [ "$TF_RESULT" != "PASSED" ] || [ "$CODEQL_RESULT" != "PASSED" ] || [ "$GITLEAKS_RESULT" != "PASSED" ]; then
             echo "Security/validation checks are not all green. Not sending to SNOW yet."
@@ -161,6 +170,7 @@ jobs:
           echo "Payload preview without secret:"
           jq '.shared_secret="****"' snow_pr_payload.json
 
+          echo "Sending payload to SNOW..."
           curl --fail-with-body -sS \
             -u "${SN_API_USER}:${SN_API_PASSWORD}" \
             -H "Content-Type: application/json" \
