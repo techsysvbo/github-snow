@@ -93,7 +93,8 @@ jobs:
           echo "Detected check runs:"
           echo "$CHECK_RUNS" | jq -r '.check_runs[]? | "\(.name) = \(.conclusion)"'
 
-          CHECKOV_STATE=$(echo "$CHECK_RUNS" | jq -r '.check_runs[]? | select((.name | ascii_downcase) == "checkov") | .conclusion' | head -1)
+          CHECKOV_STATE=$(echo "$CHECK_RUNS" | jq -r '.check_runs[]? | select((.name | ascii_downcase) | contains("checkov")) | .conclusion' | head -1)
+          # CHECKOV_STATE=$(echo "$CHECK_RUNS" | jq -r '.check_runs[]? | select((.name | ascii_downcase) == "checkov") | .conclusion' | head -1)
           TF_STATE=$(echo "$CHECK_RUNS" | jq -r '.check_runs[]? | select((.name | ascii_downcase) == "terraform-checks") | .conclusion' | head -1)
           GITLEAKS_STATE=$(echo "$CHECK_RUNS" | jq -r '.check_runs[]? | select((.name | ascii_downcase) == "gitleaks") | .conclusion' | head -1)
 
