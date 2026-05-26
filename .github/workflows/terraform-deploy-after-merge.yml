@@ -19,40 +19,30 @@ env:
   TF_IN_AUTOMATION: true
   TF_INPUT: false
 
-  # SNOW
   SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
   SN_API_USER: ${{ secrets.SN_API_USER }}
   SN_API_PASSWORD: ${{ secrets.SN_API_PASSWORD }}
   SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
 
 jobs:
-
   terraform-deploy:
-
     name: terraform-deploy
-
     runs-on:
       - self-hosted
       - linux
 
     strategy:
       fail-fast: false
-
       matrix:
         workload:
-
-          # DEV S3
           - name: dev-s3
             path: terraform/environments/dev/s3
             tfvars: dev.tfvars
-            role_arn: ${{ secrets.AWS_PROD_DEPLOY_ROLE_ARN }}
             aws_region: us-east-1
 
-          # DEV EC2
           - name: dev-ec2
             path: terraform/environments/dev/ec2
             tfvars: dev.tfvars
-            role_arn: ${{ secrets.AWS_PROD_DEPLOY_ROLE_ARN }}
             aws_region: us-east-1
 
     defaults:
@@ -61,84 +51,32 @@ jobs:
         working-directory: ${{ matrix.workload.path }}
 
     steps:
-
-      ####################################################################
-      # STEP 1 — Checkout code
-      ####################################################################
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      ####################################################################
-      # STEP 2 — Assume AWS deployment role
-      #
-      # 12-year-old explanation:
-      # GitHub first logs in with small AWS keys,
-      # then AWS temporarily upgrades GitHub into the
-      # deployment role that can deploy Terraform.
-      #
-      # SME explanation:
-      # Base IAM user credentials assume the deployment role.
-      # Terraform executes using temporary STS credentials.
-      ####################################################################
-
       - name: Assume AWS deployment role
         uses: aws-actions/configure-aws-credentials@v4
-
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-          role-to-assume: ${{ matrix.workload.role_arn }}
-
+          role-to-assume: ${{ secrets.AWS_PROD_DEPLOY_ROLE_ARN }}
           role-session-name: github-terraform-prod-deploy
-
           aws-region: ${{ matrix.workload.aws_region }}
 
-      ####################################################################
-      # STEP 3 — Verify assumed role
-      ####################################################################
-
       - name: Verify AWS caller identity
-        run: |
-          aws sts get-caller-identity
-
-      ####################################################################
-      # STEP 4 — Setup Terraform
-      ####################################################################
+        run: aws sts get-caller-identity
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
-      ####################################################################
-      # STEP 5 — Terraform format validation
-      ####################################################################
-
       - name: Terraform fmt
-        run: |
-          terraform fmt -check -recursive
-
-      ####################################################################
-      # STEP 6 — Terraform init
-      ####################################################################
+        run: terraform fmt -check -recursive
 
       - name: Terraform init
-        run: |
-          terraform init -input=false
-
-      ####################################################################
-      # STEP 7 — Terraform validate
-      ####################################################################
+        run: terraform init -input=false
 
       - name: Terraform validate
-        run: |
-          terraform validate
-
-      ####################################################################
-      # STEP 8 — Terraform plan
-      #
-      # We store the plan summary for SNOW.
-      ####################################################################
+        run: terraform validate
 
       - name: Terraform plan
         run: |
@@ -148,12 +86,6 @@ jobs:
             -no-color \
             -out=tfplan | tee terraform-plan.txt
 
-      ####################################################################
-      # STEP 9 — Terraform apply
-      #
-      # ONLY runs after merge into main.
-      ####################################################################
-
       - name: Terraform apply
         run: |
           terraform apply \
@@ -161,35 +93,20 @@ jobs:
             -input=false \
             tfplan
 
-      ####################################################################
-      # STEP 10 — Upload Terraform plan artifact
-      ####################################################################
-
       - name: Upload Terraform plan artifact
         if: always()
-
         uses: actions/upload-artifact@v4
-
         with:
           name: terraform-plan-${{ matrix.workload.name }}
-          path: |
-            ${{ matrix.workload.path }}/terraform-plan.txt
-
-      ####################################################################
-      # STEP 11 — Send SUCCESS deployment callback to SNOW
-      ####################################################################
+          path: ${{ matrix.workload.path }}/terraform-plan.txt
 
       - name: Notify SNOW deployment success
-
         if: success()
-
         env:
           DEPLOYMENT_STATUS: success
           WORKLOAD_NAME: ${{ matrix.workload.name }}
           AWS_REGION: ${{ matrix.workload.aws_region }}
-
         run: |
-
           set -euo pipefail
 
           PLAN_SUMMARY=$(grep -E "Plan:|No changes" terraform-plan.txt | tail -1 || true)
@@ -218,8 +135,6 @@ jobs:
               terraform_plan_summary: $terraform_plan_summary
             }' > deployment-success.json
 
-          echo "Sending SUCCESS callback to SNOW..."
-
           curl --fail-with-body -sS \
             -u "${SN_API_USER}:${SN_API_PASSWORD}" \
             -H "Content-Type: application/json" \
@@ -227,21 +142,13 @@ jobs:
             "${SN_INSTANCE_URL}/api/x_2000997_github_0/github_pr_approval/deployment-result" \
             --data @deployment-success.json
 
-      ####################################################################
-      # STEP 12 — Send FAILED deployment callback to SNOW
-      ####################################################################
-
       - name: Notify SNOW deployment failure
-
         if: failure()
-
         env:
           DEPLOYMENT_STATUS: failed
           WORKLOAD_NAME: ${{ matrix.workload.name }}
           AWS_REGION: ${{ matrix.workload.aws_region }}
-
         run: |
-
           set -euo pipefail
 
           PLAN_SUMMARY=$(grep -E "Plan:|No changes" terraform-plan.txt | tail -1 || true)
@@ -269,8 +176,6 @@ jobs:
               region: $region,
               terraform_plan_summary: $terraform_plan_summary
             }' > deployment-failure.json
-
-          echo "Sending FAILURE callback to SNOW..."
 
           curl -sS \
             -u "${SN_API_USER}:${SN_API_PASSWORD}" \
