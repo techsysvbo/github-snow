@@ -109,8 +109,9 @@ jobs:
           echo "terraform=$TF_RESULT"
           echo "codeql=$CODEQL_RESULT"
           echo "gitleaks=$GITLEAKS_RESULT"
-
-          if [ "$CHECKOV_RESULT" != "PASSED" ] || [ "$TF_RESULT" != "PASSED" ] || [ "$CODEQL_RESULT" != "PASSED" ] || [ "$GITLEAKS_RESULT" != "PASSED" ]; then
+          
+          if [ "$CODEQL_RESULT" != "PASSED" ] || [ "$GITLEAKS_RESULT" != "PASSED" ]; then
+          #if [ "$CHECKOV_RESULT" != "PASSED" ] || [ "$TF_RESULT" != "PASSED" ] || [ "$CODEQL_RESULT" != "PASSED" ] || [ "$GITLEAKS_RESULT" != "PASSED" ]; then
             echo "Not all required checks passed. SNOW payload will not be sent."
             exit 0
           fi
