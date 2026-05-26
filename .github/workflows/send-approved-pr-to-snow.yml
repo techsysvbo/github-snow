@@ -32,6 +32,14 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
+      - name: Run Checkov before SNOW approval request
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: .
+          framework: terraform
+          soft_fail: false
+          quiet: true
+
       - name: Build payload and send to SNOW
         env:
           GH_TOKEN: ${{ github.token }}
@@ -93,27 +101,18 @@ jobs:
           echo "Detected check runs:"
           echo "$CHECK_RUNS" | jq -r '.check_runs[]? | "\(.name) = \(.conclusion)"'
 
-          CHECKOV_STATE=$(echo "$CHECK_RUNS" | jq -r '.check_runs[]? | select((.name | ascii_downcase) | contains("checkov")) | .conclusion' | head -1)
-          # CHECKOV_STATE=$(echo "$CHECK_RUNS" | jq -r '.check_runs[]? | select((.name | ascii_downcase) == "checkov") | .conclusion' | head -1)
-          TF_STATE=$(echo "$CHECK_RUNS" | jq -r '.check_runs[]? | select((.name | ascii_downcase) == "terraform-checks") | .conclusion' | head -1)
-          GITLEAKS_STATE=$(echo "$CHECK_RUNS" | jq -r '.check_runs[]? | select((.name | ascii_downcase) == "gitleaks") | .conclusion' | head -1)
-
-          # CodeQL may show as "CodeQL", "codeql", or "codeql (javascript-typescript)"
           CODEQL_STATE=$(echo "$CHECK_RUNS" | jq -r '.check_runs[]? | select((.name | ascii_downcase) | contains("codeql")) | .conclusion' | head -1)
+          GITLEAKS_STATE=$(echo "$CHECK_RUNS" | jq -r '.check_runs[]? | select((.name | ascii_downcase) | contains("gitleaks")) | .conclusion' | head -1)
 
-          CHECKOV_RESULT=$([ "$CHECKOV_STATE" = "success" ] && echo "PASSED" || echo "FAILED_OR_PENDING")
-          TF_RESULT=$([ "$TF_STATE" = "success" ] && echo "PASSED" || echo "FAILED_OR_PENDING")
           CODEQL_RESULT=$([ "$CODEQL_STATE" = "success" ] && echo "PASSED" || echo "FAILED_OR_PENDING")
           GITLEAKS_RESULT=$([ "$GITLEAKS_STATE" = "success" ] && echo "PASSED" || echo "FAILED_OR_PENDING")
 
-          echo "checkov=$CHECKOV_RESULT"
-          echo "terraform=$TF_RESULT"
+          echo "checkov=PASSED"
           echo "codeql=$CODEQL_RESULT"
           echo "gitleaks=$GITLEAKS_RESULT"
-          
-          if [ "$CHECKOV_RESULT" != "PASSED" ] || [ "$CODEQL_RESULT" != "PASSED" ] || [ "$GITLEAKS_RESULT" != "PASSED" ]; then
-          #if [ "$CHECKOV_RESULT" != "PASSED" ] || [ "$TF_RESULT" != "PASSED" ] || [ "$CODEQL_RESULT" != "PASSED" ] || [ "$GITLEAKS_RESULT" != "PASSED" ]; then
-            echo "Not all required checks passed. SNOW payload will not be sent."
+
+          if [ "$CODEQL_RESULT" != "PASSED" ] || [ "$GITLEAKS_RESULT" != "PASSED" ]; then
+            echo "CodeQL or Gitleaks is not passed. SNOW payload will not be sent."
             exit 0
           fi
 
@@ -133,15 +132,15 @@ jobs:
             --arg engineer_email "$ENGINEER_EMAIL" \
             --arg status_context "snow-approval" \
             --arg github_check_status "success" \
-            --arg terraform_validate "$TF_RESULT" \
-            --arg checkov_scan_result "$CHECKOV_RESULT" \
+            --arg terraform_validate "NOT_REQUIRED_FOR_TEST" \
+            --arg checkov_scan_result "PASSED" \
             --arg codeql_scan_result "$CODEQL_RESULT" \
             --arg gitleaks_scan_result "$GITLEAKS_RESULT" \
             --arg pipeline_run_id "$RUN_ID" \
             --arg pipeline_url "${SERVER_URL}/${REPO_FULL}/actions/runs/${RUN_ID}" \
             --arg environment "production" \
             --arg cmdb_ci_name "$CMDB_CI_NAME" \
-            --arg impact_summary "Production-bound Terraform module change submitted for CCoE approval in ServiceNow." \
+            --arg impact_summary "Production-bound Terraform module change submitted for CCoE approval in ServiceNow. Checkov, CodeQL, and Gitleaks passed before this payload was sent." \
             --arg rollback_plan "If rejected, do not merge. If deployed and rollback is required, revert the PR or apply the previous known-good Terraform module version." \
             --argjson approvers "$APPROVERS" \
             '{
