@@ -2,10 +2,10 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "AllowCloudUserToAssumeRoleForLab",
+      "Sid": "AllowCurrentSandboxUserToAssumeRole",
       "Effect": "Allow",
       "Principal": {
-        "AWS": "arn:aws:iam::639493421189:user/cloud_user"
+        "AWS": "arn:aws:iam::226839593180:user/cloud_user"
       },
       "Action": "sts:AssumeRole"
     }

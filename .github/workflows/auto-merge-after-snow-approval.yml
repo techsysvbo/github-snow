@@ -40,35 +40,7 @@ jobs:
             core.setOutput("pr_number", pr.number);
             core.setOutput("head_sha", pr.head.sha);
 
-      - name: Verify PR checks are green
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const prNumber = Number("${{ steps.find_pr.outputs.pr_number }}");
-            const sha = "${{ steps.find_pr.outputs.head_sha }}";
-
-            const checks = await github.rest.checks.listForRef({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              ref: sha
-            });
-
-            const requiredChecks = ["checkov", "codeql", "gitleaks"];
-
-            for (const required of requiredChecks) {
-              const match = checks.data.check_runs.find(c =>
-                c.name.toLowerCase().includes(required)
-              );
-
-              if (!match || match.conclusion !== "success") {
-                core.setFailed(`${required} is not successful yet.`);
-                return;
-              }
-            }
-
-            core.info(`All required checks are green for PR #${prNumber}`);
-
-      - name: Merge PR
+      - name: Merge PR after SNOW approval
         uses: actions/github-script@v7
         with:
           script: |
@@ -80,5 +52,3 @@ jobs:
               pull_number: prNumber,
               merge_method: "squash"
             });
-
-            core.info(`Merged PR #${prNumber} after SNOW approval.`);

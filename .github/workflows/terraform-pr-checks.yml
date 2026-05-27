@@ -3,11 +3,6 @@ name: Terraform PR Checks
 on:
   pull_request:
     branches: [main]
-    paths:
-      - "terraform/**"
-      - "terraform-modules/**"
-      - "common-tags/**"
-      - ".github/workflows/**"
 
 permissions:
   contents: read
@@ -20,9 +15,11 @@ jobs:
   workflow-yaml-check:
     name: workflow-yaml-check
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
-      - name: Validate GitHub Actions YAML
+
+      - name: Validate workflow YAML
         uses: raven-actions/actionlint@v2
 
   terraform-checks:
@@ -33,22 +30,23 @@ jobs:
       fail-fast: false
       matrix:
         module:
-          - terraform/environments/dev/s3
-          - terraform/environments/dev/ec2
+          - terraform/environments/prod/s3
+          - terraform/environments/prod/ec2
 
     defaults:
       run:
+        shell: bash
         working-directory: ${{ matrix.module }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
 
       - name: Terraform fmt
         run: terraform fmt -check -recursive
 
-      - name: Terraform init without backend
+      - name: Terraform init
         run: terraform init -backend=false
 
       - name: Terraform validate
