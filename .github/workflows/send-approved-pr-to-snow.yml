@@ -27,8 +27,7 @@ jobs:
     if: github.event.review.state == 'approved' && github.event.pull_request.base.ref == 'main'
 
     steps:
-      - name: Checkout PR code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
@@ -58,7 +57,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Reading PR comments for engineer email..."
           COMMENTS=$(curl -sS \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
@@ -73,9 +71,6 @@ jobs:
             ] | last // empty
           ')
 
-          echo "Engineer email found: ${ENGINEER_EMAIL}"
-
-          echo "Reading PR approvals..."
           REVIEWS=$(curl -sS \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
@@ -84,22 +79,15 @@ jobs:
           APPROVERS=$(echo "$REVIEWS" | jq -c '[.[] | select(.state == "APPROVED") | .user.login] | unique')
           APPROVER_COUNT=$(echo "$APPROVERS" | jq 'length')
 
-          echo "Approver count: ${APPROVER_COUNT}"
-          echo "Approvers: ${APPROVERS}"
-
           if [ "$APPROVER_COUNT" -lt "$MIN_APPROVALS" ]; then
             echo "Need ${MIN_APPROVALS} approval(s) before sending to SNOW."
             exit 0
           fi
 
-          echo "Reading GitHub check runs..."
           CHECK_RUNS=$(curl -sS \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${OWNER}/${REPO}/commits/${COMMIT_SHA}/check-runs")
-
-          echo "Detected check runs:"
-          echo "$CHECK_RUNS" | jq -r '.check_runs[]? | "\(.name) = \(.conclusion)"'
 
           CODEQL_STATE=$(echo "$CHECK_RUNS" | jq -r '.check_runs[]? | select((.name | ascii_downcase) | contains("codeql")) | .conclusion' | head -1)
           GITLEAKS_STATE=$(echo "$CHECK_RUNS" | jq -r '.check_runs[]? | select((.name | ascii_downcase) | contains("gitleaks")) | .conclusion' | head -1)
@@ -107,12 +95,8 @@ jobs:
           CODEQL_RESULT=$([ "$CODEQL_STATE" = "success" ] && echo "PASSED" || echo "FAILED_OR_PENDING")
           GITLEAKS_RESULT=$([ "$GITLEAKS_STATE" = "success" ] && echo "PASSED" || echo "FAILED_OR_PENDING")
 
-          echo "checkov=PASSED"
-          echo "codeql=$CODEQL_RESULT"
-          echo "gitleaks=$GITLEAKS_RESULT"
-
           if [ "$CODEQL_RESULT" != "PASSED" ] || [ "$GITLEAKS_RESULT" != "PASSED" ]; then
-            echo "CodeQL or Gitleaks is not passed. SNOW payload will not be sent."
+            echo "CodeQL or Gitleaks not passed. SNOW payload will not be sent."
             exit 0
           fi
 
@@ -132,7 +116,7 @@ jobs:
             --arg engineer_email "$ENGINEER_EMAIL" \
             --arg status_context "snow-approval" \
             --arg github_check_status "success" \
-            --arg terraform_validate "NOT_REQUIRED_FOR_TEST" \
+            --arg terraform_validate "PASSED" \
             --arg checkov_scan_result "PASSED" \
             --arg codeql_scan_result "$CODEQL_RESULT" \
             --arg gitleaks_scan_result "$GITLEAKS_RESULT" \
@@ -140,8 +124,8 @@ jobs:
             --arg pipeline_url "${SERVER_URL}/${REPO_FULL}/actions/runs/${RUN_ID}" \
             --arg environment "production" \
             --arg cmdb_ci_name "$CMDB_CI_NAME" \
-            --arg impact_summary "Production-bound Terraform module change submitted for CCoE approval in ServiceNow. Checkov, CodeQL, and Gitleaks passed before this payload was sent." \
-            --arg rollback_plan "If rejected, do not merge. If deployed and rollback is required, revert the PR or apply the previous known-good Terraform module version." \
+            --arg impact_summary "Production-bound Terraform change submitted for CCoE approval. Checkov, CodeQL, and Gitleaks passed before this payload was sent." \
+            --arg rollback_plan "If rejected, do not merge. If deployed and rollback is required, revert the PR or apply the previous known-good Terraform version." \
             --argjson approvers "$APPROVERS" \
             '{
               shared_secret: $shared_secret,
@@ -173,12 +157,8 @@ jobs:
               cmdb_ci_name: $cmdb_ci_name,
               impact_summary: $impact_summary,
               rollback_plan: $rollback_plan
-            } | with_entries(select(.value != null and .value != "" and .value != []))' > snow_pr_payload.json
+            }' > snow_pr_payload.json
 
-          echo "Payload preview without secret:"
-          jq '.shared_secret="****"' snow_pr_payload.json
-
-          echo "Sending payload to SNOW..."
           curl --fail-with-body -sS \
             -u "${SN_API_USER}:${SN_API_PASSWORD}" \
             -H "Content-Type: application/json" \

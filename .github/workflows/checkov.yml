@@ -3,11 +3,6 @@ name: Checkov IaC Scan
 on:
   pull_request:
     branches: [main]
-    paths:
-      - "terraform/**"
-      - "terraform-modules/**"
-      - "common-tags/**"
-      - ".github/workflows/**"
 
 permissions:
   contents: read
@@ -29,18 +24,3 @@ jobs:
           framework: terraform
           soft_fail: false
           quiet: true
-          output_format: cli,sarif,json
-          output_file_path: console,results.sarif,checkov-results.json
-
-      - name: Upload Checkov SARIF
-        if: success() || failure()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: results.sarif
-
-      - name: Upload Checkov JSON
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: checkov-results
-          path: checkov-results.json
