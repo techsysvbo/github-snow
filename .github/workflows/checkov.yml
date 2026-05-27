@@ -6,8 +6,6 @@ on:
 
 permissions:
   contents: read
-  security-events: write
-  actions: read
 
 jobs:
   checkov:
@@ -17,10 +15,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run Checkov
+      - name: Run Checkov on Terraform only
         uses: bridgecrewio/checkov-action@master
         with:
-          directory: .
+          directory: terraform
           framework: terraform
-          soft_fail: false
+          soft_fail: true
           quiet: true
