@@ -13,6 +13,9 @@ permissions:
   checks: read
 
 env:
+  # This avoids Node 20 deprecation warning becoming a blocker later.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
   SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
   SN_API_PATH: ${{ secrets.SN_API_PATH }}
   SN_API_USER: ${{ secrets.SN_API_USER }}
@@ -33,9 +36,15 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
+      # 12-year-old explanation:
+      # Before we bother ServiceNow, we check that all safety robots passed.
+      #
+      # SME explanation:
+      # This prevents premature SNOW approval records before IaC/security validation completes.
       - name: Confirm required GitHub security checks passed
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.GH_PAT_FOR_SNOW }}
           script: |
             const requiredChecks = ["terraform-validate", "checkov", "gitleaks", "codeql"];
             const pr = context.payload.pull_request;
@@ -50,8 +59,13 @@ jobs:
             const failed = [];
 
             for (const name of requiredChecks) {
-              const match = checks.data.check_runs.find(c => c.name === name);
-              if (!match || !["success", "skipped", "neutral"].includes(match.conclusion)) {
+              const matchingChecks = checks.data.check_runs
+                .filter(c => c.name === name)
+                .sort((a, b) => new Date(b.started_at || b.created_at) - new Date(a.started_at || a.created_at));
+
+              const latest = matchingChecks[0];
+
+              if (!latest || !["success", "skipped", "neutral"].includes(latest.conclusion)) {
                 failed.push(name);
               }
             }
@@ -60,9 +74,15 @@ jobs:
               core.setFailed(`Required checks not complete: ${failed.join(", ")}`);
             }
 
+      # 12-year-old explanation:
+      # We lock the merge door until ServiceNow says yes.
+      #
+      # SME explanation:
+      # These two commit statuses are required branch protection gates controlled by SNOW.
       - name: Set SNOW gates to pending
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.GH_PAT_FOR_SNOW }}
           script: |
             const pr = context.payload.pull_request;
 
@@ -83,6 +103,11 @@ jobs:
               });
             }
 
+      # 12-year-old explanation:
+      # We build a package of facts for CCoE and ServiceNow.
+      #
+      # SME explanation:
+      # This enriched payload contains governance, audit, branch, SHA, reviewer, security, and deployment intent metadata.
       - name: Build enterprise SNOW payload
         shell: bash
         env:
@@ -173,9 +198,15 @@ jobs:
           print(json.dumps(payload, indent=2))
           PY
 
+      # 12-year-old explanation:
+      # We add a comment where the user can paste their Okta email.
+      #
+      # SME explanation:
+      # GitHub often hides federated SSO email. This creates a controlled metadata location for SNOW identity enrichment.
       - name: Add PR comment for Okta requestor email mapping
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.GH_PAT_FOR_SNOW }}
           script: |
             const pr = context.payload.pull_request;
 
@@ -196,6 +227,11 @@ jobs:
               body
             });
 
+      # 12-year-old explanation:
+      # Now GitHub sends the package to ServiceNow.
+      #
+      # SME explanation:
+      # SNOW receives enriched metadata, creates/updates the approval record, and later controls the required commit statuses.
       - name: Send enriched payload to ServiceNow
         shell: bash
         run: |
