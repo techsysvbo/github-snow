@@ -8,12 +8,8 @@ on:
 permissions:
   contents: read
   pull-requests: read
-  statuses: write
-  issues: write
-  checks: read
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
   SN_API_PATH: ${{ secrets.SN_API_PATH }}
   SN_API_USER: ${{ secrets.SN_API_USER }}
@@ -34,72 +30,6 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Confirm required GitHub security checks passed
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const requiredChecks = ["terraform-validate", "checkov", "gitleaks", "codeql"];
-            const pr = context.payload.pull_request;
-            const sha = pr.head.sha;
-
-            let failed = [];
-
-            for (let attempt = 1; attempt <= 24; attempt++) {
-              const checks = await github.rest.checks.listForRef({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                ref: sha,
-                per_page: 100
-              });
-
-              failed = [];
-
-              for (const name of requiredChecks) {
-                const matchingChecks = checks.data.check_runs
-                  .filter(c => c.name === name)
-                  .sort((a, b) => new Date(b.started_at || b.created_at) - new Date(a.started_at || a.created_at));
-
-                const latest = matchingChecks[0];
-
-                if (!latest || latest.status !== "completed" || !["success", "skipped", "neutral"].includes(latest.conclusion)) {
-                  failed.push(name);
-                }
-              }
-
-              if (failed.length === 0) {
-                core.info("All required security checks passed.");
-                return;
-              }
-
-              core.info(`Attempt ${attempt}: waiting for checks: ${failed.join(", ")}`);
-              await new Promise(resolve => setTimeout(resolve, 10000));
-            }
-
-            core.setFailed(`Required checks not complete: ${failed.join(", ")}`);
-
-      - name: Set SNOW gates to pending
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const pr = context.payload.pull_request;
-
-            const statuses = [
-              ["snow-approval", "Waiting for ServiceNow approval"],
-              ["snow-deployment-gate", "Waiting for ServiceNow pre-merge deployment gate"]
-            ];
-
-            for (const [contextName, description] of statuses) {
-              await github.rest.repos.createCommitStatus({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                sha: pr.head.sha,
-                state: "pending",
-                context: contextName,
-                description,
-                target_url: pr.html_url
-              });
-            }
-
       - name: Build enterprise SNOW payload
         shell: bash
         env:
@@ -108,10 +38,7 @@ jobs:
           SERVER_URL: ${{ github.server_url }}
         run: |
           python3 <<'PY'
-          import json
-          import os
-          import pathlib
-          import datetime
+          import json, os, pathlib, datetime
 
           event = json.loads(os.environ["EVENT_JSON"])
           pr = event["pull_request"]
@@ -154,12 +81,12 @@ jobs:
               "status_context": "snow-approval",
               "deployment_gate_context": "snow-deployment-gate",
 
-              "github_checks_status": "PASSED",
-              "terraform_validate": "PASSED",
-              "checkov_scan_result": "PASSED",
-              "gitleaks_scan_result": "PASSED",
-              "codeql_scan_result": "PASSED",
-              "security_scan_result": "PASSED",
+              "github_checks_status": "BRANCH_PROTECTION_ENFORCED",
+              "terraform_validate": "REQUIRED_BY_BRANCH_PROTECTION",
+              "checkov_scan_result": "REQUIRED_BY_BRANCH_PROTECTION",
+              "gitleaks_scan_result": "REQUIRED_BY_BRANCH_PROTECTION",
+              "codeql_scan_result": "REQUIRED_BY_BRANCH_PROTECTION",
+              "security_scan_result": "REQUIRED_BY_BRANCH_PROTECTION",
 
               "environment": os.environ.get("DEPLOY_ENVIRONMENT", "production"),
               "cmdb_ci_name": os.environ.get("CMDB_CI_NAME", ""),
@@ -175,12 +102,12 @@ jobs:
                   "approval_state_must_equal": "approved",
                   "pr_must_still_be_open": True,
                   "target_branch_must_equal": "main",
-                  "commit_sha_must_match_latest_pr_sha": True
+                  "commit_sha_must_match_latest_pr_sha": True,
+                  "required_github_checks_enforced_by_branch_protection": True
               },
 
               "pipeline_run_id": os.environ["RUN_ID"],
               "pipeline_url": f'{os.environ["SERVER_URL"]}/{repo["full_name"]}/actions/runs/{os.environ["RUN_ID"]}',
-              "artifact_url": "",
               "payload_created_at_utc": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
               "github_callback_attempts": "0",
               "polling_enabled": "false"
@@ -189,29 +116,6 @@ jobs:
           pathlib.Path("snow-payload.json").write_text(json.dumps(payload, indent=2))
           print(json.dumps(payload, indent=2))
           PY
-
-      - name: Add PR comment for Okta requestor email mapping
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const pr = context.payload.pull_request;
-
-            const body = `SNOW_REQUESTOR_IDENTITY_JSON
-            \`\`\`json
-            {
-              "requestor_github_username": "${pr.user.login}",
-              "requestor_email": "replace.with.requestor@email.gov",
-              "identity_source": "Okta/SCIM/manual mapping",
-              "note": "Email is captured here because GitHub may not expose federated Okta email."
-            }
-            \`\`\``;
-
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: pr.number,
-              body
-            });
 
       - name: Send enriched payload to ServiceNow
         shell: bash
