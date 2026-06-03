@@ -1,0 +1,208 @@
+name: 02 Submit PR to SNOW After SME Approval
+
+on:
+  pull_request_review:
+    types:
+      - submitted
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+  issues: write
+  checks: read
+
+env:
+  SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
+  SN_API_PATH: ${{ secrets.SN_API_PATH }}
+  SN_API_USER: ${{ secrets.SN_API_USER }}
+  SN_API_PASSWORD: ${{ secrets.SN_API_PASSWORD }}
+  SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
+  CMDB_CI_NAME: ${{ secrets.CMDB_CI_NAME }}
+  DEPLOY_ENVIRONMENT: ${{ vars.DEPLOY_ENVIRONMENT }}
+
+jobs:
+  submit-to-snow:
+    name: submit-to-snow
+    if: github.event.review.state == 'approved' && github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Confirm required GitHub security checks passed
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const requiredChecks = ["terraform-validate", "checkov", "gitleaks", "codeql"];
+            const pr = context.payload.pull_request;
+            const sha = pr.head.sha;
+
+            const checks = await github.rest.checks.listForRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: sha
+            });
+
+            const failed = [];
+
+            for (const name of requiredChecks) {
+              const match = checks.data.check_runs.find(c => c.name === name);
+              if (!match || !["success", "skipped", "neutral"].includes(match.conclusion)) {
+                failed.push(name);
+              }
+            }
+
+            if (failed.length > 0) {
+              core.setFailed(`Required checks not complete: ${failed.join(", ")}`);
+            }
+
+      - name: Set SNOW gates to pending
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+
+            const statuses = [
+              ["snow-approval", "Waiting for ServiceNow approval"],
+              ["snow-deployment-gate", "Waiting for ServiceNow pre-merge deployment gate"]
+            ];
+
+            for (const [contextName, description] of statuses) {
+              await github.rest.repos.createCommitStatus({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                sha: pr.head.sha,
+                state: "pending",
+                context: contextName,
+                description,
+                target_url: pr.html_url
+              });
+            }
+
+      - name: Build enterprise SNOW payload
+        shell: bash
+        env:
+          EVENT_JSON: ${{ toJson(github.event) }}
+          RUN_ID: ${{ github.run_id }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          import pathlib
+          import datetime
+
+          event = json.loads(os.environ["EVENT_JSON"])
+          pr = event["pull_request"]
+          review = event["review"]
+          repo = event["repository"]
+
+          payload = {
+              "shared_secret": os.environ["SN_GITHUB_SHARED_SECRET"],
+              "event_type": "pull_request_review_approved",
+              "approval_system": "github_to_servicenow",
+              "approval_required": True,
+
+              "owner": repo["owner"]["login"],
+              "repo": repo["name"],
+              "repo_name": repo["full_name"],
+              "repo_url": repo["html_url"],
+
+              "pr_number": str(pr["number"]),
+              "pr_title": pr["title"],
+              "pr_url": pr["html_url"],
+              "pr_link": pr["html_url"],
+              "pr_author": pr["user"]["login"],
+              "pr_state": pr["state"],
+              "source_branch": pr["head"]["ref"],
+              "target_branch": pr["base"]["ref"],
+              "commit_sha": pr["head"]["sha"],
+
+              "requester": pr["user"]["login"],
+              "requested_by": pr["user"]["login"],
+              "requestor_github_username": pr["user"]["login"],
+              "requestor_email": "SEE_PR_COMMENT_IDENTITY_JSON",
+
+              "sme_approval_1": review["user"]["login"],
+              "sme_approval_2": "",
+              "sme_approval_state": review["state"],
+              "sme_approval_timestamp": review["submitted_at"],
+
+              "status": "waiting_for_snow",
+              "approval_state": "requested",
+              "status_context": "snow-approval",
+              "deployment_gate_context": "snow-deployment-gate",
+
+              "github_checks_status": "PASSED",
+              "terraform_validate": "PASSED",
+              "checkov_scan_result": "PASSED",
+              "gitleaks_scan_result": "PASSED",
+              "codeql_scan_result": "PASSED",
+              "security_scan_result": "PASSED",
+
+              "environment": os.environ.get("DEPLOY_ENVIRONMENT", "production"),
+              "cmdb_ci_name": os.environ.get("CMDB_CI_NAME", ""),
+              "change_type": "normal",
+              "risk_level": "medium",
+              "business_impact": "Production infrastructure change via Terraform",
+              "impact_summary": "Terraform-managed EC2 and S3 production change submitted for ServiceNow approval before merge.",
+              "rollback_plan": "Revert PR and run Terraform apply, or restore from versioned S3/KMS-backed configuration where applicable.",
+              "rollback_tested": "not_applicable_for_demo",
+              "deployment_window": "standard_change_window",
+
+              "snow_expected_validation": {
+                  "approval_state_must_equal": "approved",
+                  "pr_must_still_be_open": True,
+                  "target_branch_must_equal": "main",
+                  "commit_sha_must_match_latest_pr_sha": True
+              },
+
+              "pipeline_run_id": os.environ["RUN_ID"],
+              "pipeline_url": f'{os.environ["SERVER_URL"]}/{repo["full_name"]}/actions/runs/{os.environ["RUN_ID"]}',
+              "artifact_url": "",
+              "payload_created_at_utc": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+              "github_callback_attempts": "0",
+              "polling_enabled": "false"
+          }
+
+          pathlib.Path("snow-payload.json").write_text(json.dumps(payload, indent=2))
+          print(json.dumps(payload, indent=2))
+          PY
+
+      - name: Add PR comment for Okta requestor email mapping
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+
+            const body = `SNOW_REQUESTOR_IDENTITY_JSON
+            \`\`\`json
+            {
+              "requestor_github_username": "${pr.user.login}",
+              "requestor_email": "replace.with.requestor@email.gov",
+              "identity_source": "Okta/SCIM/manual mapping",
+              "note": "Email is captured here because GitHub may not expose federated Okta email."
+            }
+            \`\`\``;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              body
+            });
+
+      - name: Send enriched payload to ServiceNow
+        shell: bash
+        run: |
+          curl --fail-with-body \
+            --request POST \
+            --user "$SN_API_USER:$SN_API_PASSWORD" \
+            --header "Content-Type: application/json" \
+            --header "X-GitHub-SNOW-Shared-Secret: $SN_GITHUB_SHARED_SECRET" \
+            --data @snow-payload.json \
+            "$SN_INSTANCE_URL$SN_API_PATH"

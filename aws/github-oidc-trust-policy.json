@@ -1,0 +1,24 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowGitHubActionsOIDCForMainAndPRs",
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::905418288378:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+        },
+        "StringLike": {
+          "token.actions.githubusercontent.com:sub": [
+            "repo:techsysvbo/github-snow:ref:refs/heads/main",
+            "repo:techsysvbo/github-snow:pull_request"
+          ]
+        }
+      }
+    }
+  ]
+}

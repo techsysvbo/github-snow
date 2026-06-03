@@ -1,0 +1,125 @@
+name: 03 Deploy After Merge
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TF_IN_AUTOMATION: true
+  TF_INPUT: false
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+  SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
+  SN_API_USER: ${{ secrets.SN_API_USER }}
+  SN_API_PASSWORD: ${{ secrets.SN_API_PASSWORD }}
+  SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
+  CMDB_CI_NAME: ${{ secrets.CMDB_CI_NAME }}
+
+jobs:
+  terraform-deploy:
+    name: terraform-deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v5
+
+      - name: Configure AWS temporary credentials using OIDC assume role
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_PROD_DEPLOY_ROLE_ARN }}
+          role-session-name: github-snow-prod-deploy
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform format check
+        run: terraform fmt -check -recursive terraform
+
+      - name: Terraform init prod S3
+        working-directory: terraform/environments/prod/s3
+        run: terraform init -input=false
+
+      - name: Terraform plan prod S3
+        working-directory: terraform/environments/prod/s3
+        run: terraform plan -input=false -out=tfplan -no-color | tee terraform-plan.txt
+
+      - name: Terraform apply prod S3
+        working-directory: terraform/environments/prod/s3
+        run: terraform apply -auto-approve tfplan
+
+      - name: Terraform init prod EC2
+        working-directory: terraform/environments/prod/ec2
+        run: terraform init -input=false
+
+      - name: Terraform plan prod EC2
+        working-directory: terraform/environments/prod/ec2
+        run: terraform plan -input=false -out=tfplan -no-color | tee terraform-plan.txt
+
+      - name: Terraform apply prod EC2
+        working-directory: terraform/environments/prod/ec2
+        run: terraform apply -auto-approve tfplan
+
+      - name: Notify SNOW deployment success
+        if: success()
+        shell: bash
+        run: |
+          cat > deployment-result.json <<EOF_JSON
+          {
+            "shared_secret": "${SN_GITHUB_SHARED_SECRET}",
+            "event_type": "deployment_result",
+            "repo_name": "${GITHUB_REPOSITORY}",
+            "commit_sha": "${GITHUB_SHA}",
+            "merge_commit_sha": "${GITHUB_SHA}",
+            "cmdb_ci_name": "${CMDB_CI_NAME}",
+            "deployment_status": "success",
+            "deployment_environment": "production",
+            "rollback_performed": false,
+            "deployment_run_id": "${GITHUB_RUN_ID}",
+            "deployment_pipeline_url": "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}",
+            "deployment_timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "terraform_plan_summary": "S3 and EC2 production Terraform apply completed successfully."
+          }
+          EOF_JSON
+
+          curl --fail-with-body \
+            --request POST \
+            --user "$SN_API_USER:$SN_API_PASSWORD" \
+            --header "Content-Type: application/json" \
+            --data @deployment-result.json \
+            "$SN_INSTANCE_URL/api/x_2000997_github_0/github_pr_approval/deployment-result"
+
+      - name: Notify SNOW deployment failure
+        if: failure()
+        shell: bash
+        run: |
+          cat > deployment-result.json <<EOF_JSON
+          {
+            "shared_secret": "${SN_GITHUB_SHARED_SECRET}",
+            "event_type": "deployment_result",
+            "repo_name": "${GITHUB_REPOSITORY}",
+            "commit_sha": "${GITHUB_SHA}",
+            "merge_commit_sha": "${GITHUB_SHA}",
+            "cmdb_ci_name": "${CMDB_CI_NAME}",
+            "deployment_status": "failure",
+            "deployment_environment": "production",
+            "rollback_performed": false,
+            "deployment_run_id": "${GITHUB_RUN_ID}",
+            "deployment_pipeline_url": "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}",
+            "deployment_timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "terraform_plan_summary": "Production Terraform apply failed. Manual remediation or rollback required."
+          }
+          EOF_JSON
+
+          curl --fail-with-body \
+            --request POST \
+            --user "$SN_API_USER:$SN_API_PASSWORD" \
+            --header "Content-Type: application/json" \
+            --data @deployment-result.json \
+            "$SN_INSTANCE_URL/api/x_2000997_github_0/github_pr_approval/deployment-result"
