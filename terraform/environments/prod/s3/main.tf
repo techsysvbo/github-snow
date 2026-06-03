@@ -64,6 +64,7 @@ resource "aws_sqs_queue_policy" "s3_events" {
 }
 
 resource "aws_s3_bucket" "logs" {
+  #checkov:skip=CKV_AWS_144:Access log bucket is the terminal logging bucket for this demo. Replicating logs can create unnecessary recursive logging complexity. Exception must be reviewed for real prod.
   bucket = "github-snow-prod-logs-${random_id.suffix.hex}"
 }
 
@@ -127,6 +128,7 @@ resource "aws_s3_bucket_notification" "logs" {
 }
 
 resource "aws_s3_bucket" "replica" {
+  #checkov:skip=CKV_AWS_144:This is the destination replica bucket. Replicating the replica bucket again would create recursive/demo-only complexity. Exception must be reviewed for real prod.
   bucket = "github-snow-prod-replica-${random_id.suffix.hex}"
 }
 
@@ -155,6 +157,44 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "replica" {
       sse_algorithm     = "aws:kms"
     }
   }
+}
+
+resource "aws_s3_bucket_logging" "replica" {
+  bucket        = aws_s3_bucket.replica.id
+  target_bucket = aws_s3_bucket.logs.id
+  target_prefix = "replica-access-logs/"
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "replica" {
+  bucket = aws_s3_bucket.replica.id
+
+  rule {
+    id     = "replica-retention-and-multipart-cleanup"
+    status = "Enabled"
+
+    filter {
+      prefix = ""
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+}
+
+resource "aws_s3_bucket_notification" "replica" {
+  bucket = aws_s3_bucket.replica.id
+
+  queue {
+    queue_arn = aws_sqs_queue.s3_events.arn
+    events    = ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"]
+  }
+
+  depends_on = [aws_sqs_queue_policy.s3_events]
 }
 
 resource "aws_iam_role" "replication" {
@@ -249,7 +289,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "app" {
 resource "aws_s3_bucket_logging" "app" {
   bucket        = aws_s3_bucket.app.id
   target_bucket = aws_s3_bucket.logs.id
-  target_prefix = "s3-access-logs/"
+  target_prefix = "app-access-logs/"
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "app" {
