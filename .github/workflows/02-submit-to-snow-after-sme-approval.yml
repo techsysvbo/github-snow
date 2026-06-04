@@ -38,7 +38,10 @@ jobs:
           SERVER_URL: ${{ github.server_url }}
         run: |
           python3 <<'PY'
-          import json, os, pathlib, datetime
+          import json
+          import os
+          import pathlib
+          import datetime
 
           event = json.loads(os.environ["EVENT_JSON"])
           pr = event["pull_request"]
@@ -93,8 +96,9 @@ jobs:
               "change_type": "normal",
               "risk_level": "medium",
               "business_impact": "Production infrastructure change via Terraform",
+
               "impact_summary": "Terraform-managed EC2 and S3 production change submitted for ServiceNow approval before merge.",
-              "rollback_plan": "Revert PR and run Terraform apply, or restore from versioned S3/KMS-backed configuration where applicable.",
+              "rollback_plan": "If rejected, do not merge. If deployed and rollback is required, revert the PR or apply the previous known-good Terraform version.",
               "rollback_tested": "not_applicable_for_demo",
               "deployment_window": "standard_change_window",
 
@@ -108,6 +112,7 @@ jobs:
 
               "pipeline_run_id": os.environ["RUN_ID"],
               "pipeline_url": f'{os.environ["SERVER_URL"]}/{repo["full_name"]}/actions/runs/{os.environ["RUN_ID"]}',
+
               "payload_created_at_utc": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
               "github_callback_attempts": "0",
               "polling_enabled": "false"

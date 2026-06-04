@@ -49,7 +49,7 @@ jobs:
           terraform init -backend=false -input=false
           terraform validate
 
-      - name: Reset SNOW gates when PR changes
+      - name: Reset SNOW gates to pending when PR changes
         uses: actions/github-script@v7
         with:
           script: |
@@ -94,7 +94,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout full repository history
+      - name: Checkout full history
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
@@ -112,7 +112,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Check whether JavaScript or TypeScript exists
+      - name: Check for JavaScript or TypeScript
         id: js_check
         shell: bash
         run: |
@@ -136,4 +136,4 @@ jobs:
 
       - name: CodeQL intentionally skipped
         if: steps.js_check.outputs.has_js == 'false'
-        run: echo "No JavaScript or TypeScript found. CodeQL intentionally skipped."
+        run: echo "No JS/TS found. CodeQL intentionally skipped."
