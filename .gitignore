@@ -1,9 +1,66 @@
-
-# Terraform local/cache files
-**/.terraform/*
+# Terraform
+**/.terraform/
 *.tfstate
 *.tfstate.*
-*.tfvars
-*.tfvars.json
+*.tfplan
+tfplan
 crash.log
 crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Secrets / local env
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.kubeconfig
+credentials
+config.local
+
+# AWS local files
+.aws/
+awscliv2.zip
+
+# Node / app build junk
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+coverage/
+dist/
+build/
+
+# Python local junk
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Backups
+backup/
+backup*/
+*.backup
+*.bak
+*.disabled
+*-backup*
+*-backup*
+*.old
