@@ -9,70 +9,164 @@ permissions:
   checks: read
   statuses: read
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   auto-merge:
     name: auto-merge-after-snow-approval
     runs-on: ubuntu-latest
 
-    if: github.event.context == 'snow-approval' && github.event.state == 'success'
+    # Only run when SNOW approval or SNOW deployment gate becomes successful.
+    if: >
+      github.event.state == 'success' &&
+      (
+        github.event.context == 'snow-approval' ||
+        github.event.context == 'snow-deployment-gate'
+      )
 
     steps:
-      - name: Find PR for approved commit
-        uses: actions/github-script@v7
+      - name: Find approved open PR to main
         id: find_pr
+        uses: actions/github-script@v7
         with:
           script: |
-            const sha = context.payload.sha;
+            /*
+              Simple explanation:
+              GitHub received a green light from ServiceNow.
+              Now we look for the open PR to main that has all green lights.
 
-            const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              commit_sha: sha
+              SME explanation:
+              Do not rely only on status event SHA → PR mapping.
+              That mapping can fail after sync/rebase/merge queue/status updates.
+              Instead, enumerate open PRs to main and validate each PR head SHA.
+            */
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const openPrs = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: "open",
+              base: "main",
+              per_page: 100
             });
 
-            const pr = prs.data.find(p => p.state === "open" && p.base.ref === "main");
-
-            if (!pr) {
-              core.setFailed(`No open PR to main found for SHA ${sha}`);
+            if (openPrs.length === 0) {
+              core.setFailed("No open PRs targeting main were found.");
               return;
             }
 
-            core.setOutput("pr_number", pr.number);
-            core.setOutput("head_sha", pr.head.sha);
+            const requiredStatusContexts = [
+              "snow-approval",
+              "snow-deployment-gate"
+            ];
 
-      - name: Verify PR checks are green
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const prNumber = Number("${{ steps.find_pr.outputs.pr_number }}");
-            const sha = "${{ steps.find_pr.outputs.head_sha }}";
+            const requiredCheckNames = [
+              "terraform-checks",
+              "checkov",
+              "codeql",
+              "gitleaks"
+            ];
 
-            const checks = await github.rest.checks.listForRef({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              ref: sha
-            });
-
-            const requiredChecks = ["checkov", "codeql", "gitleaks"];
-
-            for (const required of requiredChecks) {
-              const match = checks.data.check_runs.find(c =>
-                c.name.toLowerCase().includes(required)
-              );
-
-              if (!match || match.conclusion !== "success") {
-                core.setFailed(`${required} is not successful yet.`);
-                return;
+            for (const pr of openPrs) {
+              if (pr.draft) {
+                core.info(`Skipping PR #${pr.number}: PR is draft.`);
+                continue;
               }
+
+              const sha = pr.head.sha;
+              core.info(`Checking PR #${pr.number} with head SHA ${sha}`);
+
+              const statuses = await github.rest.repos.getCombinedStatusForRef({
+                owner,
+                repo,
+                ref: sha
+              });
+
+              const statusOk = requiredStatusContexts.every(contextName => {
+                const matches = statuses.data.statuses
+                  .filter(s => s.context === contextName)
+                  .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
+
+                const latest = matches[0];
+
+                if (!latest) {
+                  core.info(`PR #${pr.number}: missing status ${contextName}`);
+                  return false;
+                }
+
+                if (latest.state !== "success") {
+                  core.info(`PR #${pr.number}: ${contextName} is ${latest.state}`);
+                  return false;
+                }
+
+                return true;
+              });
+
+              if (!statusOk) {
+                continue;
+              }
+
+              const checks = await github.rest.checks.listForRef({
+                owner,
+                repo,
+                ref: sha,
+                per_page: 100
+              });
+
+              const checkOk = requiredCheckNames.every(requiredName => {
+                const matches = checks.data.check_runs
+                  .filter(c => c.name.toLowerCase().includes(requiredName.toLowerCase()))
+                  .sort((a, b) => new Date(b.completed_at || b.started_at || b.created_at) - new Date(a.completed_at || a.started_at || a.created_at));
+
+                const latest = matches[0];
+
+                if (!latest) {
+                  core.info(`PR #${pr.number}: missing check ${requiredName}`);
+                  return false;
+                }
+
+                if (latest.status !== "completed" || latest.conclusion !== "success") {
+                  core.info(`PR #${pr.number}: ${latest.name} is ${latest.status}/${latest.conclusion}`);
+                  return false;
+                }
+
+                return true;
+              });
+
+              if (!checkOk) {
+                continue;
+              }
+
+              core.setOutput("pr_number", String(pr.number));
+              core.setOutput("head_sha", sha);
+              core.info(`Selected PR #${pr.number} for auto-merge.`);
+              return;
             }
 
-            core.info(`All required checks are green for PR #${prNumber}`);
+            core.setFailed("No open PR to main has all required security checks and SNOW statuses green.");
 
       - name: Merge PR
         uses: actions/github-script@v7
         with:
           script: |
+            /*
+              Simple explanation:
+              The PR has all green lights, so GitHub merges it.
+
+              SME explanation:
+              Merge is performed only after branch-protection-equivalent checks
+              and SNOW-controlled commit statuses are verified on the PR head SHA.
+            */
+
             const prNumber = Number("${{ steps.find_pr.outputs.pr_number }}");
+
+            if (!prNumber) {
+              core.setFailed("Missing PR number. Cannot merge.");
+              return;
+            }
 
             await github.rest.pulls.merge({
               owner: context.repo.owner,
@@ -81,4 +175,4 @@ jobs:
               merge_method: "squash"
             });
 
-            core.info(`Merged PR #${prNumber} after SNOW approval.`);
+            core.info(`Merged PR #${prNumber} after SNOW approval and deployment gate success.`);
