@@ -2,32 +2,56 @@ name: CodeQL Security Scan
 
 on:
   pull_request:
-    branches: [main]
+    branches:
+      - main
   push:
-    branches: [main]
+    branches:
+      - main
 
 permissions:
   contents: read
   security-events: write
   actions: read
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   codeql:
     name: codeql
     runs-on: ubuntu-latest
 
-    strategy:
-      fail-fast: false
-      matrix:
-        language: ["javascript-typescript"]
-
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Check if JavaScript or TypeScript exists
+        id: js_ts_check
+        shell: bash
+        run: |
+          if find . -type f \( -name "*.js" -o -name "*.jsx" -o -name "*.ts" -o -name "*.tsx" \) \
+            ! -path "./.git/*" \
+            ! -path "./node_modules/*" \
+            ! -path "./.terraform/*" \
+            ! -path "./terraform/**/.terraform/*" \
+            | grep -q .; then
+            echo "has_js_ts=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_js_ts=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        if: steps.js_ts_check.outputs.has_js_ts == 'true'
+        uses: github/codeql-action/init@v4
         with:
-          languages: ${{ matrix.language }}
+          languages: javascript-typescript
 
       - name: Run CodeQL
-        uses: github/codeql-action/analyze@v3
+        if: steps.js_ts_check.outputs.has_js_ts == 'true'
+        uses: github/codeql-action/analyze@v4
+
+      - name: No JavaScript or TypeScript found
+        if: steps.js_ts_check.outputs.has_js_ts == 'false'
+        run: |
+          echo "No JavaScript or TypeScript files found after cleanup."
+          echo "CodeQL is intentionally marked successful because there is no supported source code to analyze."
