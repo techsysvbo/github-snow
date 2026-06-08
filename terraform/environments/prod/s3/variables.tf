@@ -4,5 +4,5 @@ variable "aws_region" {
 }
 variable "bucket_name" {
   type    = string
-  default = "github-snow-dev-demo-bucket"
+  default = "github-snow-prod-demo-bucket"
 }

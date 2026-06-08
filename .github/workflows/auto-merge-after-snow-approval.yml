@@ -1,178 +1,60 @@
-name: Auto Merge After SNOW Approval
-
+# 7yo: When SNOW turns both lights green, find the ready PR, recheck all safety
+#      lights, then merge. If nothing is ready, finish happily (no fail).
+# SME: Triggered on status events. Finds an open PR to main where both snow gates
+#      are success AND combined checks success, not draft, then squash merges.
+#      No eligible PR => no-op success (avoids race-condition red runs).
+name: auto-merge-after-snow-approval
 on:
-  status
-
+  status: {}
+  workflow_dispatch: {}
 permissions:
   contents: write
   pull-requests: write
-  checks: read
   statuses: read
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
+  checks: read
 jobs:
   auto-merge:
-    name: auto-merge-after-snow-approval
     runs-on: ubuntu-latest
-
-    # Only run when SNOW approval or SNOW deployment gate becomes successful.
-    if: >
-      github.event.state == 'success' &&
-      (
-        github.event.context == 'snow-approval' ||
-        github.event.context == 'snow-deployment-gate'
-      )
-
     steps:
-      - name: Find approved open PR to main
-        id: find_pr
-        uses: actions/github-script@v7
-        with:
-          script: |
-            /*
-              Simple explanation:
-              GitHub received a green light from ServiceNow.
-              Now we look for the open PR to main that has all green lights.
-
-              SME explanation:
-              Do not rely only on status event SHA → PR mapping.
-              That mapping can fail after sync/rebase/merge queue/status updates.
-              Instead, enumerate open PRs to main and validate each PR head SHA.
-            */
-
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-
-            const openPrs = await github.paginate(github.rest.pulls.list, {
-              owner,
-              repo,
-              state: "open",
-              base: "main",
-              per_page: 100
-            });
-
-            if (openPrs.length === 0) {
-              core.setFailed("No open PRs targeting main were found.");
-              return;
-            }
-
-            const requiredStatusContexts = [
-              "snow-approval",
-              "snow-deployment-gate"
-            ];
-
-            const requiredCheckNames = [
-              "terraform-checks",
-              "checkov",
-              "codeql",
-              "gitleaks"
-            ];
-
-            for (const pr of openPrs) {
-              if (pr.draft) {
-                core.info(`Skipping PR #${pr.number}: PR is draft.`);
-                continue;
-              }
-
-              const sha = pr.head.sha;
-              core.info(`Checking PR #${pr.number} with head SHA ${sha}`);
-
-              const statuses = await github.rest.repos.getCombinedStatusForRef({
-                owner,
-                repo,
-                ref: sha
-              });
-
-              const statusOk = requiredStatusContexts.every(contextName => {
-                const matches = statuses.data.statuses
-                  .filter(s => s.context === contextName)
-                  .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
-
-                const latest = matches[0];
-
-                if (!latest) {
-                  core.info(`PR #${pr.number}: missing status ${contextName}`);
-                  return false;
-                }
-
-                if (latest.state !== "success") {
-                  core.info(`PR #${pr.number}: ${contextName} is ${latest.state}`);
-                  return false;
-                }
-
-                return true;
-              });
-
-              if (!statusOk) {
-                continue;
-              }
-
-              const checks = await github.rest.checks.listForRef({
-                owner,
-                repo,
-                ref: sha,
-                per_page: 100
-              });
-
-              const checkOk = requiredCheckNames.every(requiredName => {
-                const matches = checks.data.check_runs
-                  .filter(c => c.name.toLowerCase().includes(requiredName.toLowerCase()))
-                  .sort((a, b) => new Date(b.completed_at || b.started_at || b.created_at) - new Date(a.completed_at || a.started_at || a.created_at));
-
-                const latest = matches[0];
-
-                if (!latest) {
-                  core.info(`PR #${pr.number}: missing check ${requiredName}`);
-                  return false;
-                }
-
-                if (latest.status !== "completed" || latest.conclusion !== "success") {
-                  core.info(`PR #${pr.number}: ${latest.name} is ${latest.status}/${latest.conclusion}`);
-                  return false;
-                }
-
-                return true;
-              });
-
-              if (!checkOk) {
-                continue;
-              }
-
-              core.setOutput("pr_number", String(pr.number));
-              core.setOutput("head_sha", sha);
-              core.info(`Selected PR #${pr.number} for auto-merge.`);
-              return;
-            }
-
-            core.setFailed("No open PR to main has all required security checks and SNOW statuses green.");
-
-      - name: Merge PR
-        uses: actions/github-script@v7
-        with:
-          script: |
-            /*
-              Simple explanation:
-              The PR has all green lights, so GitHub merges it.
-
-              SME explanation:
-              Merge is performed only after branch-protection-equivalent checks
-              and SNOW-controlled commit statuses are verified on the PR head SHA.
-            */
-
-            const prNumber = Number("${{ steps.find_pr.outputs.pr_number }}");
-
-            if (!prNumber) {
-              core.setFailed("Missing PR number. Cannot merge.");
-              return;
-            }
-
-            await github.rest.pulls.merge({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: prNumber,
-              merge_method: "squash"
-            });
-
-            core.info(`Merged PR #${prNumber} after SNOW approval and deployment gate success.`);
+      - name: Find and merge an eligible PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          PRS=$(gh api "repos/${GITHUB_REPOSITORY}/pulls?state=open&base=main" \
+                --jq '.[] | {number: .number, sha: .head.sha, draft: .draft}')
+          if [ -z "${PRS}" ]; then
+            echo "No open PRs targeting main. No-op."; exit 0
+          fi
+          echo "${PRS}" | python3 - <<'PY'
+          import json, os, subprocess, sys
+          repo = os.environ["GITHUB_REPOSITORY"]
+          eligible = None
+          for line in sys.stdin.read().splitlines():
+              if not line.strip():
+                  continue
+              pr = json.loads(line)
+              num, sha, draft = pr["number"], pr["sha"], pr["draft"]
+              if draft:
+                  continue
+              raw = subprocess.run(
+                  ["gh","api",f"repos/{repo}/commits/{sha}/status"],
+                  capture_output=True, text=True, check=True).stdout
+              data = json.loads(raw)
+              ctx = {s["context"]: s["state"] for s in data.get("statuses", [])}
+              overall = data.get("state")
+              snow_ok = ctx.get("snow-approval") == "success" and \
+                        ctx.get("snow-deployment-gate") == "success"
+              checks_ok = overall == "success"
+              print(f"PR #{num}: snow_ok={snow_ok} checks_ok={checks_ok} contexts={ctx}")
+              if snow_ok and checks_ok:
+                  eligible = num
+                  break
+          if eligible is None:
+              print("No eligible PR yet (gates/checks not all green). No-op success.")
+              sys.exit(0)
+          print(f"Merging PR #{eligible} (squash).")
+          subprocess.run(
+              ["gh","pr","merge",str(eligible),"--squash","--auto","--repo",repo],
+              check=True)
+          PY

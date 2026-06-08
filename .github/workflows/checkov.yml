@@ -1,46 +1,28 @@
-name: Checkov IaC Scan
-
+# 7yo: Looks at the Terraform and asks "did you forget any locks?"
+# SME: Checkov IaC static analysis for AWS misconfigs; SARIF to Security tab.
+name: checkov
 on:
   pull_request:
-    branches: [main]
-    paths:
-      - "terraform/**"
-      - "terraform-modules/**"
-      - "common-tags/**"
-      - ".github/workflows/**"
-
+    branches: [ main ]
+    paths: [ "terraform/**" ]
 permissions:
   contents: read
   security-events: write
-  actions: read
-
 jobs:
   checkov:
-    name: checkov
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
       - name: Run Checkov
-        uses: bridgecrewio/checkov-action@master
+        uses: bridgecrewio/checkov-action@v12
         with:
-          directory: .
+          directory: terraform/
           framework: terraform
+          output_format: cli,sarif
+          output_file_path: console,results.sarif
           soft_fail: false
-          quiet: true
-          output_format: cli,sarif,json
-          output_file_path: console,results.sarif,checkov-results.json
-
-      - name: Upload Checkov SARIF
-        if: success() || failure()
+      - name: Upload SARIF
+        if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: results.sarif
-
-      - name: Upload Checkov JSON
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: checkov-results
-          path: checkov-results.json

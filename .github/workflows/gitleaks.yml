@@ -1,28 +1,19 @@
-name: Gitleaks Secret Scan
-
+# 7yo: Reads the code for secrets someone left lying around; stops if found.
+# SME: Scans working tree AND history for secrets/keys. Supports "no hardcoded passwords".
+name: gitleaks
 on:
   pull_request:
-    branches: [main]
-
+    branches: [ main ]
 permissions:
   contents: read
-  pull-requests: read
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   gitleaks:
-    name: gitleaks
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Run Gitleaks
+      - name: Run gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "true"

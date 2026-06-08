@@ -3,7 +3,7 @@ module "ec2" {
   ami_id        = data.aws_ami.al2023.id
   instance_type = var.instance_type
   tags = {
-    Environment = "dev"
+    Environment = "prod"
     ManagedBy   = "terraform"
     Project     = "github-snow"
   }

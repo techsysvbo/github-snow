@@ -8,7 +8,7 @@ terraform {
   }
   backend "s3" {
     bucket         = "github-snow-tfstate-654654155215"
-    key            = "dev/s3/terraform.tfstate"
+    key            = "prod/ec2/terraform.tfstate"
     region         = "us-east-1"
     dynamodb_table = "github-snow-tflock"
     encrypt        = true

@@ -2,7 +2,7 @@ module "s3" {
   source      = "../../../modules/s3"
   bucket_name = var.bucket_name
   tags = {
-    Environment = "dev"
+    Environment = "prod"
     ManagedBy   = "terraform"
     Project     = "github-snow"
   }

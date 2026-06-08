@@ -1,9 +1,11 @@
-
-# Terraform local/cache files
-**/.terraform/*
-*.tfstate
-*.tfstate.*
-*.tfvars
-*.tfvars.json
+node_modules/
+backup/
+*.backup
+*.disabled
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.*
+*.tfplan
+*.tfstate.backup
 crash.log
-crash.*.log

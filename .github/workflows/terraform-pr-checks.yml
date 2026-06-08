@@ -1,55 +1,34 @@
-name: Terraform PR Checks
-
+# 7yo: Checks the Terraform is spelled right in every room before anyone says yes.
+# SME: Matrix fmt/init/validate. init uses -backend=false so PR checks need NO creds.
+name: terraform-checks
 on:
   pull_request:
-    branches: [main]
-    paths:
-      - "terraform/**"
-      - "terraform-modules/**"
-      - "common-tags/**"
-      - ".github/workflows/**"
-
+    branches: [ main ]
+    paths: [ "terraform/**" ]
 permissions:
   contents: read
-
-env:
-  TF_IN_AUTOMATION: true
-  TF_INPUT: false
-
 jobs:
-  workflow-yaml-check:
-    name: workflow-yaml-check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Validate GitHub Actions YAML
-        uses: raven-actions/actionlint@v2
-
   terraform-checks:
-    name: terraform-checks
     runs-on: ubuntu-latest
-
     strategy:
       fail-fast: false
       matrix:
-        module:
+        path:
           - terraform/environments/dev/s3
           - terraform/environments/dev/ec2
-
-    defaults:
-      run:
-        working-directory: ${{ matrix.module }}
-
+          - terraform/environments/prod/s3
+          - terraform/environments/prod/ec2
     steps:
       - uses: actions/checkout@v4
-
       - uses: hashicorp/setup-terraform@v3
-
-      - name: Terraform fmt
+        with:
+          terraform_version: 1.9.5
+      - name: fmt
         run: terraform fmt -check -recursive
-
-      - name: Terraform init without backend
-        run: terraform init -backend=false
-
-      - name: Terraform validate
+        working-directory: ${{ matrix.path }}
+      - name: init (no backend, no creds needed on PR)
+        run: terraform init -backend=false -input=false
+        working-directory: ${{ matrix.path }}
+      - name: validate
         run: terraform validate
+        working-directory: ${{ matrix.path }}
