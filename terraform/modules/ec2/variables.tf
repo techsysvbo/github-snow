@@ -1,11 +1,21 @@
 variable "ami_id" {
-  type = string
+  description = "AMI ID used for the EC2 instance."
+  type        = string
 }
+
 variable "instance_type" {
-  type    = string
-  default = "t3.micro"
+  description = "EC2 instance type."
+  type        = string
+  default     = "t3.micro"
 }
+
+variable "iam_instance_profile" {
+  description = "IAM instance profile name attached to the EC2 instance."
+  type        = string
+}
+
 variable "tags" {
-  type    = map(string)
-  default = {}
+  description = "Resource tags."
+  type        = map(string)
+  default     = {}
 }

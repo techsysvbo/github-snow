@@ -1,9 +1,44 @@
 data "aws_caller_identity" "current" {}
 
+data "aws_partition" "current" {}
+
 resource "aws_kms_key" "this" {
   description             = "KMS key for ${var.bucket_name}"
   deletion_window_in_days = 30
   enable_key_rotation     = true
+
+  # Explicit KMS key policy required by Checkov CKV2_AWS_64.
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "EnableRootAccountAdministration"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:root"
+        }
+        Action   = "kms:*"
+        Resource = "*"
+      },
+      {
+        Sid    = "AllowS3UseOfKey"
+        Effect = "Allow"
+        Principal = {
+          Service = "s3.amazonaws.com"
+        }
+        Action = [
+          "kms:Decrypt",
+          "kms:Encrypt",
+          "kms:GenerateDataKey",
+          "kms:GenerateDataKeyWithoutPlaintext",
+          "kms:ReEncryptFrom",
+          "kms:ReEncryptTo",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
 
   tags = var.tags
 }
@@ -223,7 +258,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "this" {
   bucket = aws_s3_bucket.this.id
 
   rule {
-    id     = "standard-retention"
+    id     = "primary-retention"
     status = "Enabled"
 
     filter {
@@ -251,7 +286,9 @@ resource "aws_s3_bucket_notification" "this" {
     ]
   }
 
-  depends_on = [aws_sqs_queue_policy.events]
+  depends_on = [
+    aws_sqs_queue_policy.events
+  ]
 }
 
 resource "aws_iam_role" "replication" {
@@ -261,6 +298,7 @@ resource "aws_iam_role" "replication" {
     Version = "2012-10-17"
     Statement = [
       {
+        Sid    = "AllowS3ReplicationAssumeRole"
         Effect = "Allow"
         Principal = {
           Service = "s3.amazonaws.com"
@@ -319,7 +357,7 @@ resource "aws_s3_bucket_replication_configuration" "this" {
   bucket = aws_s3_bucket.this.id
 
   rule {
-    id     = "replicate-all-objects"
+    id     = "replicate-all-primary-objects"
     status = "Enabled"
 
     filter {
