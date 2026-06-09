@@ -1,23 +1,27 @@
-# 7yo: After a reviewer approves, gather all the facts and send them to SNOW.
-# SME: Builds the enriched governance payload via python json.dumps (always valid
-#      JSON), POSTs to the SNOW Scripted REST intake with a short-lived OAuth token.
 name: send-approved-pr-to-snow
+
 on:
   pull_request_review:
-    types: [ submitted ]
+    types: [submitted]
+
 permissions:
   contents: read
   pull-requests: read
   statuses: read
+
 jobs:
   send-to-snow:
+    name: send-to-snow
     if: >
       github.event.review.state == 'approved' &&
       github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Collect check results
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Collect GitHub combined status
         id: checks
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -26,6 +30,7 @@ jobs:
           set -euo pipefail
           STATE=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/status" --jq '.state')
           echo "github_check_status=${STATE}" >> "$GITHUB_OUTPUT"
+
       - name: Get ServiceNow OAuth token
         id: token
         env:
@@ -36,22 +41,52 @@ jobs:
           SN_OAUTH_PASSWORD: ${{ secrets.SN_OAUTH_PASSWORD }}
         run: |
           set -euo pipefail
-          TOKEN=$(curl -sS -X POST "${SN_OAUTH_TOKEN_URL}" \
-            -H 'Content-Type: application/x-www-form-urlencoded' \
+
+          for item in SN_OAUTH_TOKEN_URL SN_OAUTH_CLIENT_ID SN_OAUTH_CLIENT_SECRET SN_OAUTH_USERNAME SN_OAUTH_PASSWORD; do
+            if [ -z "${!item:-}" ]; then
+              echo "Missing required GitHub secret: ${item}"
+              exit 1
+            fi
+          done
+
+          TOKEN_RESPONSE=$(curl --fail-with-body -sS -X POST "${SN_OAUTH_TOKEN_URL}" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
             --data-urlencode "grant_type=password" \
             --data-urlencode "client_id=${SN_OAUTH_CLIENT_ID}" \
             --data-urlencode "client_secret=${SN_OAUTH_CLIENT_SECRET}" \
             --data-urlencode "username=${SN_OAUTH_USERNAME}" \
-            --data-urlencode "password=${SN_OAUTH_PASSWORD}" \
-            | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')
-          echo "::add-mask::$TOKEN"
-          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
-      - name: Send enriched approval payload to ServiceNow
+            --data-urlencode "password=${SN_OAUTH_PASSWORD}")
+
+          ACCESS_TOKEN=$(TOKEN_RESPONSE="${TOKEN_RESPONSE}" python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          raw = os.environ.get("TOKEN_RESPONSE", "")
+          try:
+              data = json.loads(raw)
+          except Exception:
+              print("ServiceNow OAuth response was not valid JSON.", file=sys.stderr)
+              print(raw[:500], file=sys.stderr)
+              sys.exit(1)
+
+          token = data.get("access_token")
+          if not token:
+              print("ServiceNow OAuth did not return access_token.", file=sys.stderr)
+              print("Response keys:", ", ".join(data.keys()), file=sys.stderr)
+              print("Common causes: wrong client ID, wrong client secret, wrong username/password, OAuth app inactive, token URL wrong, or password grant disabled.", file=sys.stderr)
+              sys.exit(1)
+
+          print(token)
+          PY
+          )
+
+          echo "::add-mask::${ACCESS_TOKEN}"
+          echo "token=${ACCESS_TOKEN}" >> "$GITHUB_OUTPUT"
+
+      - name: Build enriched approval payload
         env:
-          SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
-          SN_API_PATH: ${{ secrets.SN_API_PATH }}
           SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
-          BEARER: ${{ steps.token.outputs.token }}
           GH_CHECK_STATUS: ${{ steps.checks.outputs.github_check_status }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
@@ -59,71 +94,112 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REQUESTER: ${{ github.event.pull_request.user.login }}
           APPROVER: ${{ github.event.review.user.login }}
-          MERGEABLE: ${{ github.event.pull_request.mergeable }}
           CMDB_CI_NAME: ${{ secrets.CMDB_CI_NAME }}
         run: |
           set -euo pipefail
-          PAYLOAD=$(python3 - <<'PY'
-          import json, os, datetime
+
+          python3 <<'PY' > snow-payload.json
+          import datetime
+          import json
+          import os
+
           g = os.environ.get
           now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
           end = (datetime.datetime.utcnow() + datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
           repo = g("GITHUB_REPOSITORY", "")
-          owner = repo.split("/")[0] if "/" in repo else g("GITHUB_REPOSITORY_OWNER", "")
-          name = repo.split("/")[1] if "/" in repo else repo
+          owner, name = repo.split("/")
           server = g("GITHUB_SERVER_URL", "https://github.com")
           run_id = g("GITHUB_RUN_ID", "")
-          try:
-              pr_number = int(g("PR_NUMBER", "0"))
-          except ValueError:
-              pr_number = 0
+          pr_number = int(g("PR_NUMBER", "0"))
+
           payload = {
-              "shared_secret": g("SN_GITHUB_SHARED_SECRET", ""),
-              "event_type": "pull_request_ready_for_snow_approval",
-              "owner": owner,
-              "repo": name,
-              "repo_name": repo,
-              "pr_number": pr_number,
-              "pr_link": f"{server}/{repo}/pull/{pr_number}",
-              "pr_title": g("PR_TITLE", ""),
-              "source_branch": g("SRC_BRANCH", ""),
-              "target_branch": "main",
-              "commit_sha": g("HEAD_SHA", ""),
-              "requester": g("REQUESTER", ""),
-              "requestor_github_username": g("REQUESTER", ""),
-              "requestor_email": "FROM_PR_COMMENT_OR_OKTA_MAPPING",
-              "approvers": [g("APPROVER", "")],
-              "status": "waiting_for_snow",
-              "approval_state": "requested",
-              "status_context": "snow-approval",
-              "deployment_gate_context": "snow-deployment-gate",
-              "github_check_status": g("GH_CHECK_STATUS", ""),
-              "mergeable": g("MERGEABLE", ""),
-              "terraform_validate": "PASSED",
-              "checkov_scan_result": "PASSED",
-              "codeql_scan_result": "PASSED",
-              "gitleaks_scan_result": "PASSED",
-              "security_scan_result": "PASSED",
-              "pipeline_run_id": run_id,
-              "pipeline_url": f"{server}/{repo}/actions/runs/{run_id}",
-              "environment": "production",
-              "cmdb_ci_name": g("CMDB_CI_NAME", ""),
-              "priority": "medium",
-              "risk": "medium",
-              "impact": "medium",
-              "justification": "Production-bound Terraform module change submitted for CCoE approval in ServiceNow.",
-              "implementation_plan": "Merge to main after SNOW approval triggers OIDC-authenticated Terraform apply to the prod environment path.",
-              "impact_summary": "Production-bound Terraform module change submitted for CCoE approval in ServiceNow.",
-              "rollback_plan": "If rejected, do not merge. If deployed and rollback required, revert the PR or re-apply previous known-good Terraform module version.",
-              "planned_start_date": now,
-              "planned_end_date": end,
-              "triggered_at": now,
+            "shared_secret": g("SN_GITHUB_SHARED_SECRET", ""),
+            "event_type": "pull_request_ready_for_snow_approval",
+
+            "owner": owner,
+            "repo": name,
+            "repo_name": repo,
+
+            "pr_number": pr_number,
+            "pr_link": f"{server}/{repo}/pull/{pr_number}",
+            "pr_title": g("PR_TITLE", ""),
+            "source_branch": g("SRC_BRANCH", ""),
+            "target_branch": "main",
+            "commit_sha": g("HEAD_SHA", ""),
+
+            "requester": g("REQUESTER", ""),
+            "requestor_github_username": g("REQUESTER", ""),
+            "requestor_email": "FROM_PR_COMMENT_OR_OKTA_MAPPING",
+
+            "approvers": [g("APPROVER", "")],
+            "sme_approval_1": g("APPROVER", ""),
+
+            "status": "waiting_for_snow",
+            "approval_state": "requested",
+            "status_context": "snow-approval",
+            "deployment_gate_context": "snow-deployment-gate",
+
+            "github_check_status": g("GH_CHECK_STATUS", ""),
+            "terraform_validate": "PASSED",
+            "checkov_scan_result": "PASSED",
+            "codeql_scan_result": "PASSED",
+            "gitleaks_scan_result": "PASSED",
+            "security_scan_result": "PASSED",
+
+            "pipeline_run_id": run_id,
+            "pipeline_url": f"{server}/{repo}/actions/runs/{run_id}",
+
+            "environment": "production",
+            "cmdb_ci_name": g("CMDB_CI_NAME", ""),
+
+            "priority": "medium",
+            "risk": "medium",
+            "impact": "medium",
+
+            "justification": "Production-bound Terraform module change submitted for CCoE approval in ServiceNow.",
+            "implementation_plan": "Merge to main after SNOW approval triggers OIDC-authenticated Terraform apply.",
+            "impact_summary": "Production-bound Terraform module change submitted for CCoE approval in ServiceNow.",
+            "rollback_plan": "If rejected, do not merge. If deployed and rollback is required, revert the PR or apply the previous known-good Terraform module version.",
+
+            "planned_start_date": now,
+            "planned_end_date": end,
+            "triggered_at": now
           }
-          print(json.dumps(payload))
+
+          print(json.dumps(payload, indent=2))
           PY
-          )
-          curl -sS -X POST "${SN_INSTANCE_URL}${SN_API_PATH}" \
+
+          cat snow-payload.json
+
+      - name: Send enriched approval payload to ServiceNow
+        env:
+          SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
+          SN_API_PATH: ${{ secrets.SN_API_PATH }}
+          BEARER: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SN_INSTANCE_URL:-}" ]; then
+            echo "Missing required GitHub secret: SN_INSTANCE_URL"
+            exit 1
+          fi
+
+          if [ -z "${SN_API_PATH:-}" ]; then
+            echo "Missing required GitHub secret: SN_API_PATH"
+            exit 1
+          fi
+
+          if [ -z "${BEARER:-}" ]; then
+            echo "Missing OAuth bearer token from previous step."
+            exit 1
+          fi
+
+          URL="${SN_INSTANCE_URL}${SN_API_PATH}"
+          echo "Posting approval payload to ServiceNow."
+
+          curl --fail-with-body -sS -X POST "${URL}" \
             -H "Authorization: Bearer ${BEARER}" \
             -H "Content-Type: application/json" \
             -H "Accept: application/json" \
-            -d "${PAYLOAD}"
+            --data @snow-payload.json
