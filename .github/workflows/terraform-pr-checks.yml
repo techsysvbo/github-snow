@@ -1,6 +1,7 @@
-# 7yo: This checks the whole dev room and the whole prod room.
-# SME: Environment-level Terraform validation. Modules are reusable building blocks;
-# branch protection should require environment root stack checks, not every module.
+# 7yo: This checks the whole dev room and the whole prod room on every PR.
+# SME: Environment-level Terraform validation. Do not use paths filters here because
+# branch protection expects these checks on every PR. If a PR only changes README or
+# workflow files, required Terraform checks must still report success instead of missing.
 
 name: terraform-checks
 
@@ -8,8 +9,7 @@ on:
   pull_request:
     branches:
       - main
-    paths:
-      - "terraform/**"
+  workflow_dispatch:
 
 permissions:
   contents: read
