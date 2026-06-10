@@ -8,7 +8,6 @@ permissions:
   contents: write
   pull-requests: write
   statuses: read
-  checks: read
 
 jobs:
   auto-merge:
@@ -16,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Find eligible PR and merge
+      - name: Find PR with SNOW approvals and merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           STATUS_CONTEXT: ${{ github.event.context }}
@@ -24,11 +23,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Triggered by status context: ${STATUS_CONTEXT:-manual}"
-          echo "Triggered by status state: ${STATUS_STATE:-manual}"
+          echo "Triggered by: ${STATUS_CONTEXT:-manual} / ${STATUS_STATE:-manual}"
 
-          # Only act on SNOW success status events.
-          # Manual dispatch is allowed for testing.
+          # Only react to ServiceNow success statuses.
           if [ "${GITHUB_EVENT_NAME}" = "status" ]; then
             if [ "${STATUS_STATE}" != "success" ]; then
               echo "Status is not success. No-op."
@@ -36,21 +33,19 @@ jobs:
             fi
 
             if [ "${STATUS_CONTEXT}" != "snow-approval" ] && [ "${STATUS_CONTEXT}" != "snow-deployment-gate" ]; then
-              echo "Status is not a SNOW gate. No-op."
+              echo "Not a SNOW-controlled status. No-op."
               exit 0
             fi
           fi
 
-          echo "Listing open PRs targeting main..."
+          # Find open PRs targeting main.
           gh api "repos/${GITHUB_REPOSITORY}/pulls?state=open&base=main&per_page=100" \
-            --jq '.[] | {number: .number, sha: .head.sha, draft: .draft, title: .title}' > open-prs.jsonl
+            --jq '.[] | {number: .number, sha: .head.sha, draft: .draft}' > open-prs.jsonl
 
           if [ ! -s open-prs.jsonl ]; then
-            echo "No open PRs targeting main. No-op."
+            echo "No open PRs targeting main."
             exit 0
           fi
-
-          cat open-prs.jsonl
 
           python3 <<'PY'
           import json
@@ -60,26 +55,15 @@ jobs:
 
           repo = os.environ["GITHUB_REPOSITORY"]
 
-          required_status_contexts = [
-              "snow-approval",
-              "snow-deployment-gate"
-          ]
-
-          required_check_keywords = [
-              "terraform",
-              "checkov",
-              "gitleaks",
-              "codeql"
-          ]
-
           def run_json(cmd):
               result = subprocess.run(cmd, capture_output=True, text=True)
               if result.returncode != 0:
+                  print(result.stdout)
                   print(result.stderr)
-                  raise SystemExit(result.returncode)
+                  sys.exit(result.returncode)
               return json.loads(result.stdout)
 
-          eligible_pr = None
+          eligible = None
 
           with open("open-prs.jsonl", "r", encoding="utf-8") as f:
               prs = [json.loads(line) for line in f if line.strip()]
@@ -87,12 +71,9 @@ jobs:
           for pr in prs:
               number = pr["number"]
               sha = pr["sha"]
-              draft = pr["draft"]
 
-              print(f"Checking PR #{number}, sha={sha}, draft={draft}")
-
-              if draft:
-                  print(f"PR #{number} skipped because it is draft.")
+              if pr["draft"]:
+                  print(f"Skipping PR #{number}: draft.")
                   continue
 
               status_data = run_json([
@@ -100,89 +81,42 @@ jobs:
                   f"repos/{repo}/commits/{sha}/status"
               ])
 
-              latest_statuses = {}
-              for status in status_data.get("statuses", []):
-                  ctx = status.get("context")
-                  if ctx and ctx not in latest_statuses:
-                      latest_statuses[ctx] = status.get("state")
+              statuses = {}
+              for s in status_data.get("statuses", []):
+                  if s.get("context") not in statuses:
+                      statuses[s.get("context")] = s.get("state")
 
-              snow_ok = True
-              for ctx in required_status_contexts:
-                  state = latest_statuses.get(ctx)
-                  print(f"PR #{number}: {ctx}={state}")
-                  if state != "success":
-                      snow_ok = False
+              snow_approval = statuses.get("snow-approval")
+              snow_deploy_gate = statuses.get("snow-deployment-gate")
 
-              if not snow_ok:
-                  print(f"PR #{number} skipped because SNOW gates are not both success.")
-                  continue
+              print(f"PR #{number}: snow-approval={snow_approval}")
+              print(f"PR #{number}: snow-deployment-gate={snow_deploy_gate}")
 
-              checks_data = run_json([
-                  "gh", "api",
-                  f"repos/{repo}/commits/{sha}/check-runs?per_page=100"
-              ])
+              if snow_approval == "success" and snow_deploy_gate == "success":
+                  eligible = number
+                  break
 
-              check_runs = checks_data.get("check_runs", [])
-              for check in check_runs:
-                  print(
-                      f"Check found: {check.get('name')} "
-                      f"status={check.get('status')} "
-                      f"conclusion={check.get('conclusion')}"
-                  )
-
-              checks_ok = True
-              for keyword in required_check_keywords:
-                  matches = [
-                      c for c in check_runs
-                      if keyword.lower() in c.get("name", "").lower()
-                  ]
-
-                  if not matches:
-                      print(f"PR #{number}: missing check containing '{keyword}'")
-                      checks_ok = False
-                      break
-
-                  latest = sorted(
-                      matches,
-                      key=lambda c: c.get("completed_at") or c.get("started_at") or c.get("created_at") or "",
-                      reverse=True
-                  )[0]
-
-                  name = latest.get("name")
-                  status = latest.get("status")
-                  conclusion = latest.get("conclusion")
-
-                  print(f"PR #{number}: matched {keyword}: {name} = {status}/{conclusion}")
-
-                  if status != "completed" or conclusion != "success":
-                      checks_ok = False
-                      break
-
-              if not checks_ok:
-                  print(f"PR #{number} skipped because required GitHub checks are not all success.")
-                  continue
-
-              eligible_pr = number
-              break
-
-          if not eligible_pr:
-              print("No eligible PR found. No-op success.")
+          if not eligible:
+              print("No PR has both SNOW gates green. No-op.")
               sys.exit(0)
 
-          print(f"Merging PR #{eligible_pr} now.")
+          print(f"Attempting to merge PR #{eligible}.")
 
-          merge = subprocess.run([
-              "gh", "pr", "merge", str(eligible_pr),
+          # GitHub branch protection remains the final gate.
+          # If Checkov, CodeQL, Gitleaks, Terraform checks, reviews, or up-to-date checks fail,
+          # GitHub will reject this merge automatically.
+          result = subprocess.run([
+              "gh", "pr", "merge", str(eligible),
               "--squash",
               "--repo", repo
           ], capture_output=True, text=True)
 
-          print(merge.stdout)
-          print(merge.stderr)
+          print(result.stdout)
+          print(result.stderr)
 
-          if merge.returncode != 0:
-              print(f"Merge failed for PR #{eligible_pr}.")
-              sys.exit(merge.returncode)
+          if result.returncode != 0:
+              print("Merge failed. Branch protection is likely still blocking it.")
+              sys.exit(result.returncode)
 
-          print(f"PR #{eligible_pr} merged successfully.")
+          print(f"PR #{eligible} merged successfully.")
           PY
