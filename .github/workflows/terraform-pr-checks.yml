@@ -1,55 +1,52 @@
-name: Terraform PR Checks
+# 7yo: This checks the whole dev room and the whole prod room on every PR.
+# SME: Environment-level Terraform validation. Do not use paths filters here because
+# branch protection expects these checks on every PR. If a PR only changes README or
+# workflow files, required Terraform checks must still report success instead of missing.
+
+name: terraform-checks
 
 on:
   pull_request:
-    branches: [main]
-    paths:
-      - "terraform/**"
-      - "terraform-modules/**"
-      - "common-tags/**"
-      - ".github/workflows/**"
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-env:
-  TF_IN_AUTOMATION: true
-  TF_INPUT: false
-
 jobs:
-  workflow-yaml-check:
-    name: workflow-yaml-check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Validate GitHub Actions YAML
-        uses: raven-actions/actionlint@v2
-
   terraform-checks:
-    name: terraform-checks
+    name: terraform-checks (${{ matrix.environment.name }})
     runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
       matrix:
-        module:
-          - terraform/environments/dev/s3
-          - terraform/environments/dev/ec2
+        environment:
+          - name: dev
+            path: terraform/environments/dev
+          - name: prod
+            path: terraform/environments/prod
 
     defaults:
       run:
-        working-directory: ${{ matrix.module }}
+        shell: bash
+        working-directory: ${{ matrix.environment.path }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v5
 
-      - uses: hashicorp/setup-terraform@v3
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.5
 
       - name: Terraform fmt
         run: terraform fmt -check -recursive
 
       - name: Terraform init without backend
-        run: terraform init -backend=false
+        run: terraform init -backend=false -input=false
 
       - name: Terraform validate
         run: terraform validate

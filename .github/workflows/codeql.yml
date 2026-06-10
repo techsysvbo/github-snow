@@ -1,33 +1,52 @@
-name: CodeQL Security Scan
-
+# 7yo: Reads real app code for bugs. If there is no app code, it passes (no-op).
+# SME: Terraform-only repo => CodeQL succeeds as a no-op. Stable required-check "CodeQL".
+name: codeql
 on:
   pull_request:
-    branches: [main]
-  push:
-    branches: [main]
-
+    branches: [ main ]
 permissions:
   contents: read
   security-events: write
-  actions: read
-
 jobs:
-  codeql:
-    name: codeql
+  detect:
     runs-on: ubuntu-latest
-
-    strategy:
-      fail-fast: false
-      matrix:
-        language: ["javascript-typescript"]
-
+    outputs:
+      has_code: ${{ steps.detect.outputs.has_code }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+      - id: detect
+        name: Detect analyzable source
+        run: |
+          if find . -path ./.git -prune -o \
+               \( -name '*.js' -o -name '*.ts' -o -name '*.py' -o -name '*.go' \) -print \
+               | grep -q .; then
+            echo "has_code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_code=false" >> "$GITHUB_OUTPUT"
+            echo "No analyzable source found. CodeQL will no-op (pass)."
+          fi
+  analyze:
+    needs: detect
+    if: needs.detect.outputs.has_code == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        language: [ javascript-typescript ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
-
-      - name: Run CodeQL
-        uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@v3
+  codeql:
+    needs: [ detect, analyze ]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gate result
+        run: |
+          if [ "${{ needs.detect.outputs.has_code }}" = "true" ] && \
+             [ "${{ needs.analyze.result }}" != "success" ]; then
+            echo "CodeQL analysis failed."; exit 1
+          fi
+          echo "CodeQL gate passed (analyzed or no-op)."
