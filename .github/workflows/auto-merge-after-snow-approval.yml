@@ -1,8 +1,3 @@
-# 7yo: When ServiceNow says yes twice, this tries to merge the PR.
-# SME: This workflow only checks SNOW gates. GitHub branch protection remains
-# the final enforcement point for terraform-checks, checkov, gitleaks, codeql,
-# reviews, up-to-date branch, and conversations.
-
 name: auto-merge-after-snow-approval
 
 on:
@@ -107,7 +102,8 @@ jobs:
                   print(result.stderr)
 
                   if result.returncode != 0:
-                      print("Merge failed. Branch protection is still blocking it.")
+                      print("Merge failed. GitHub branch protection is still blocking it.")
+                      print("This is expected if terraform-checks, checkov, codeql, gitleaks, review, or branch-up-to-date is not green.")
                       sys.exit(result.returncode)
 
                   print(f"PR #{number} merged successfully.")
