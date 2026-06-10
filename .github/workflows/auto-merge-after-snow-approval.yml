@@ -1,3 +1,8 @@
+# 7yo: When ServiceNow says yes twice, this tries to merge the PR.
+# SME: This workflow only checks SNOW gates. GitHub branch protection remains
+# the final enforcement point for terraform-checks, checkov, gitleaks, codeql,
+# reviews, up-to-date branch, and conversations.
+
 name: auto-merge-after-snow-approval
 
 on:
@@ -25,7 +30,6 @@ jobs:
 
           echo "Triggered by: ${STATUS_CONTEXT:-manual} / ${STATUS_STATE:-manual}"
 
-          # Only react to ServiceNow success statuses.
           if [ "${GITHUB_EVENT_NAME}" = "status" ]; then
             if [ "${STATUS_STATE}" != "success" ]; then
               echo "Status is not success. No-op."
@@ -38,12 +42,11 @@ jobs:
             fi
           fi
 
-          # Find open PRs targeting main.
           gh api "repos/${GITHUB_REPOSITORY}/pulls?state=open&base=main&per_page=100" \
             --jq '.[] | {number: .number, sha: .head.sha, draft: .draft}' > open-prs.jsonl
 
           if [ ! -s open-prs.jsonl ]; then
-            echo "No open PRs targeting main."
+            echo "No open PRs targeting main. No-op."
             exit 0
           fi
 
@@ -63,8 +66,6 @@ jobs:
                   sys.exit(result.returncode)
               return json.loads(result.stdout)
 
-          eligible = None
-
           with open("open-prs.jsonl", "r", encoding="utf-8") as f:
               prs = [json.loads(line) for line in f if line.strip()]
 
@@ -83,40 +84,35 @@ jobs:
 
               statuses = {}
               for s in status_data.get("statuses", []):
-                  if s.get("context") not in statuses:
-                      statuses[s.get("context")] = s.get("state")
+                  context = s.get("context")
+                  if context not in statuses:
+                      statuses[context] = s.get("state")
 
               snow_approval = statuses.get("snow-approval")
-              snow_deploy_gate = statuses.get("snow-deployment-gate")
+              snow_gate = statuses.get("snow-deployment-gate")
 
               print(f"PR #{number}: snow-approval={snow_approval}")
-              print(f"PR #{number}: snow-deployment-gate={snow_deploy_gate}")
+              print(f"PR #{number}: snow-deployment-gate={snow_gate}")
 
-              if snow_approval == "success" and snow_deploy_gate == "success":
-                  eligible = number
-                  break
+              if snow_approval == "success" and snow_gate == "success":
+                  print(f"Attempting to merge PR #{number}.")
 
-          if not eligible:
-              print("No PR has both SNOW gates green. No-op.")
-              sys.exit(0)
+                  result = subprocess.run([
+                      "gh", "pr", "merge", str(number),
+                      "--squash",
+                      "--repo", repo
+                  ], capture_output=True, text=True)
 
-          print(f"Attempting to merge PR #{eligible}.")
+                  print(result.stdout)
+                  print(result.stderr)
 
-          # GitHub branch protection remains the final gate.
-          # If Checkov, CodeQL, Gitleaks, Terraform checks, reviews, or up-to-date checks fail,
-          # GitHub will reject this merge automatically.
-          result = subprocess.run([
-              "gh", "pr", "merge", str(eligible),
-              "--squash",
-              "--repo", repo
-          ], capture_output=True, text=True)
+                  if result.returncode != 0:
+                      print("Merge failed. Branch protection is still blocking it.")
+                      sys.exit(result.returncode)
 
-          print(result.stdout)
-          print(result.stderr)
+                  print(f"PR #{number} merged successfully.")
+                  sys.exit(0)
 
-          if result.returncode != 0:
-              print("Merge failed. Branch protection is likely still blocking it.")
-              sys.exit(result.returncode)
-
-          print(f"PR #{eligible} merged successfully.")
+          print("No PR has both SNOW gates green. No-op.")
+          sys.exit(0)
           PY

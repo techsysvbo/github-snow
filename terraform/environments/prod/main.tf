@@ -1,3 +1,16 @@
+# 7yo: Prod uses the same safe modules, but prod has its own names and tags.
+# SME: Prod root stack creates one production validation/deployment unit.
+
+data "aws_ami" "al2023" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-2023.*-x86_64"]
+  }
+}
+
 resource "aws_iam_role" "ec2_ssm" {
   name = "github-snow-prod-ec2-ssm-role"
 
@@ -5,7 +18,6 @@ resource "aws_iam_role" "ec2_ssm" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "AllowEC2AssumeRole"
         Effect = "Allow"
         Principal = {
           Service = "ec2.amazonaws.com"
@@ -15,7 +27,7 @@ resource "aws_iam_role" "ec2_ssm" {
     ]
   })
 
-  tags = local.tags
+  tags = local.common_tags
 }
 
 resource "aws_iam_role_policy_attachment" "ssm_core" {
@@ -28,12 +40,16 @@ resource "aws_iam_instance_profile" "ec2" {
   role = aws_iam_role.ec2_ssm.name
 }
 
-module "ec2" {
-  source = "../../../modules/ec2"
+module "s3" {
+  source      = "../../modules/s3"
+  bucket_name = var.bucket_name
+  tags        = local.common_tags
+}
 
-  ami_id               = data.aws_ami.amazon_linux_2023.id
+module "ec2" {
+  source               = "../../modules/ec2"
+  ami_id               = data.aws_ami.al2023.id
   instance_type        = var.instance_type
   iam_instance_profile = aws_iam_instance_profile.ec2.name
-
-  tags = local.tags
+  tags                 = local.common_tags
 }

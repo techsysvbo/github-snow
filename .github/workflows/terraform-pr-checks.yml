@@ -1,34 +1,52 @@
-# 7yo: Checks the Terraform is spelled right in every room before anyone says yes.
-# SME: Matrix fmt/init/validate. init uses -backend=false so PR checks need NO creds.
+# 7yo: This checks the whole dev room and the whole prod room.
+# SME: Environment-level Terraform validation. Modules are reusable building blocks;
+# branch protection should require environment root stack checks, not every module.
+
 name: terraform-checks
+
 on:
   pull_request:
-    branches: [ main ]
-    paths: [ "terraform/**" ]
+    branches:
+      - main
+    paths:
+      - "terraform/**"
+
 permissions:
   contents: read
+
 jobs:
   terraform-checks:
+    name: terraform-checks (${{ matrix.environment.name }})
     runs-on: ubuntu-latest
+
     strategy:
       fail-fast: false
       matrix:
-        path:
-          - terraform/environments/dev/s3
-          - terraform/environments/dev/ec2
-          - terraform/environments/prod/s3
-          - terraform/environments/prod/ec2
+        environment:
+          - name: dev
+            path: terraform/environments/dev
+          - name: prod
+            path: terraform/environments/prod
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ matrix.environment.path }}
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.9.5
-      - name: fmt
+
+      - name: Terraform fmt
         run: terraform fmt -check -recursive
-        working-directory: ${{ matrix.path }}
-      - name: init (no backend, no creds needed on PR)
+
+      - name: Terraform init without backend
         run: terraform init -backend=false -input=false
-        working-directory: ${{ matrix.path }}
-      - name: validate
+
+      - name: Terraform validate
         run: terraform validate
-        working-directory: ${{ matrix.path }}
