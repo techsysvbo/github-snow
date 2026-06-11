@@ -1,8 +1,3 @@
-# 7yo: This checks the whole dev room and the whole prod room on every PR.
-# SME: Environment-level Terraform validation. Do not use paths filters here because
-# branch protection expects these checks on every PR. If a PR only changes README or
-# workflow files, required Terraform checks must still report success instead of missing.
-
 name: terraform-checks
 
 on:
