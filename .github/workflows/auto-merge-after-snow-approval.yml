@@ -1,4 +1,4 @@
-name: Auto Merge After SNOW Approval
+name: auto-merge-after-snow-approval
 
 on:
   status:
