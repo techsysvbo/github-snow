@@ -1,21 +1,36 @@
-# 7yo: Reads real app code for bugs. If there is no app code, it passes (no-op).
-# SME: Terraform-only repo => CodeQL succeeds as a no-op. Stable required-check "CodeQL".
 name: codeql
+
 on:
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
+  push:
+    branches:
+      - main
+      - "feature/**"
+      - "feature-*"
+      - "fix/**"
+      - "bugfix/**"
+      - "hotfix/**"
+  workflow_dispatch:
+
 permissions:
   contents: read
   security-events: write
+
 jobs:
   detect:
+    name: codeql-detect-source
     runs-on: ubuntu-latest
     outputs:
       has_code: ${{ steps.detect.outputs.has_code }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
       - id: detect
         name: Detect analyzable source
+        shell: bash
         run: |
           if find . -path ./.git -prune -o \
                \( -name '*.js' -o -name '*.ts' -o -name '*.py' -o -name '*.go' \) -print \
@@ -23,30 +38,45 @@ jobs:
             echo "has_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
-            echo "No analyzable source found. CodeQL will no-op (pass)."
+            echo "No analyzable source found. CodeQL will no-op and pass."
           fi
+
   analyze:
+    name: codeql-analyze
     needs: detect
     if: needs.detect.outputs.has_code == 'true'
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        language: [ javascript-typescript ]
+        language:
+          - javascript-typescript
     steps:
-      - uses: actions/checkout@v4
-      - uses: github/codeql-action/init@v3
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
-      - uses: github/codeql-action/analyze@v3
+
+      - name: Run CodeQL analyze
+        uses: github/codeql-action/analyze@v4
+
   codeql:
-    needs: [ detect, analyze ]
+    name: codeql
+    needs:
+      - detect
+      - analyze
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Gate result
+      - name: CodeQL gate result
+        shell: bash
         run: |
-          if [ "${{ needs.detect.outputs.has_code }}" = "true" ] && \
-             [ "${{ needs.analyze.result }}" != "success" ]; then
-            echo "CodeQL analysis failed."; exit 1
+          if [ "${{ needs.detect.outputs.has_code }}" = "true" ] && [ "${{ needs.analyze.result }}" != "success" ]; then
+            echo "CodeQL analysis failed."
+            exit 1
           fi
-          echo "CodeQL gate passed (analyzed or no-op)."
+
+          echo "CodeQL gate passed."
