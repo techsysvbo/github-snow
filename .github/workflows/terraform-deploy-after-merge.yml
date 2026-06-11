@@ -26,6 +26,11 @@ jobs:
       TF_ENV_PATH: terraform/environments/prod
       TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
       TF_LOCK_TABLE: ${{ vars.TF_LOCK_TABLE }}
+      SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
+      SN_DEPLOYMENT_CALLBACK_PATH: ${{ secrets.SN_DEPLOYMENT_CALLBACK_PATH }}
+      SN_API_USER: ${{ secrets.SN_API_USER }}
+      SN_API_PASSWORD: ${{ secrets.SN_API_PASSWORD }}
+      SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
 
     steps:
       - name: Checkout main
