@@ -1,4 +1,4 @@
-name: Auto Merge After SNOW Approval
+name: auto-merge-after-snow-approval
 
 on:
   status:
@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Find PR with SNOW approvals and merge
+      - name: Merge PR after SNOW deployment gate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           STATUS_CONTEXT: ${{ github.event.context }}
@@ -29,14 +29,16 @@ jobs:
 
           echo "Triggered by: ${STATUS_CONTEXT:-manual} / ${STATUS_STATE:-manual}"
 
+          # Only the final SNOW gate should trigger merge.
+          # This prevents duplicate runs when SNOW sets both snow-approval and snow-deployment-gate.
           if [ "${GITHUB_EVENT_NAME}" = "status" ]; then
-            if [ "${STATUS_STATE}" != "success" ]; then
-              echo "Status is not success. No-op."
+            if [ "${STATUS_CONTEXT}" != "snow-deployment-gate" ]; then
+              echo "Not snow-deployment-gate. No-op."
               exit 0
             fi
 
-            if [ "${STATUS_CONTEXT}" != "snow-approval" ] && [ "${STATUS_CONTEXT}" != "snow-deployment-gate" ]; then
-              echo "Not a SNOW-controlled status. No-op."
+            if [ "${STATUS_STATE}" != "success" ]; then
+              echo "snow-deployment-gate is not success. No-op."
               exit 0
             fi
           fi
@@ -93,24 +95,36 @@ jobs:
               print(f"PR #{number}: snow-approval={snow_approval}")
               print(f"PR #{number}: snow-deployment-gate={snow_gate}")
 
-              if snow_approval == "success" and snow_gate == "success":
-                  print(f"Attempting to merge PR #{number}.")
+              if snow_approval != "success" or snow_gate != "success":
+                  continue
 
-                  result = subprocess.run([
-                      "gh", "pr", "merge", str(number),
-                      "--squash",
-                      "--repo", repo
-                  ], capture_output=True, text=True)
+              print(f"Attempting to merge PR #{number}.")
 
-                  print(result.stdout)
-                  print(result.stderr)
+              result = subprocess.run([
+                  "gh", "pr", "merge", str(number),
+                  "--squash",
+                  "--repo", repo
+              ], capture_output=True, text=True)
 
-                  if result.returncode != 0:
-                      print("Merge failed. Branch protection is still blocking it.")
-                      sys.exit(result.returncode)
+              print(result.stdout)
+              print(result.stderr)
 
-                  print(f"PR #{number} merged successfully.")
-                  sys.exit(0)
+              combined = result.stdout + result.stderr
+
+              if result.returncode != 0:
+                  if "Merge already in progress" in combined:
+                      print("Merge already in progress. Treating as success/no-op.")
+                      sys.exit(0)
+
+                  if "Pull Request is not mergeable" in combined:
+                      print("PR is not mergeable yet. No-op.")
+                      sys.exit(0)
+
+                  print("Merge failed.")
+                  sys.exit(result.returncode)
+
+              print(f"PR #{number} merged successfully.")
+              sys.exit(0)
 
           print("No PR has both SNOW gates green. No-op.")
           sys.exit(0)
