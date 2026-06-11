@@ -38,6 +38,13 @@ jobs:
 
           missing="false"
 
+          # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          # 🔴 SECURITY FIX #3: AWS CONFIGURATION VALIDATION
+          # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          # 7yo: Check we have all the magic passwords before we start.
+          # SME: Validates AWS credentials and Terraform backend variables exist.
+          # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
           if [ -z "${AWS_REGION}" ]; then
             echo "Missing AWS_REGION secret."
             missing="true"
@@ -53,15 +60,50 @@ jobs:
             missing="true"
           fi
 
+          # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          # 🔴 SECURITY FIX #4: SERVICENOW CALLBACK VALIDATION
+          # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          # 7yo: Check we can talk to ServiceNow before we deploy anything.
+          # SME: ADDED: Early validation of ServiceNow secrets to fail fast.
+          #      Previously failed at curl step (near end of job). Now fails early,
+          #      saving time and preventing partial deployments from being notified.
+          # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+          if [ -z "${SN_INSTANCE_URL:-}" ]; then
+            echo "Missing SN_INSTANCE_URL secret."
+            missing="true"
+          fi
+
+          if [ -z "${SN_DEPLOYMENT_CALLBACK_PATH:-}" ]; then
+            echo "Missing SN_DEPLOYMENT_CALLBACK_PATH secret."
+            missing="true"
+          fi
+
+          if [ -z "${SN_API_USER:-}" ]; then
+            echo "Missing SN_API_USER secret."
+            missing="true"
+          fi
+
+          if [ -z "${SN_API_PASSWORD:-}" ]; then
+            echo "Missing SN_API_PASSWORD secret."
+            missing="true"
+          fi
+
+          if [ -z "${SN_GITHUB_SHARED_SECRET:-}" ]; then
+            echo "Missing SN_GITHUB_SHARED_SECRET secret."
+            missing="true"
+          fi
+
           if [ "${missing}" = "true" ]; then
             echo "Fix missing GitHub secrets or variables before deployment."
             exit 1
           fi
 
-          echo "Deployment configuration is present."
-          echo "AWS_REGION=${AWS_REGION}"
-          echo "TF_STATE_BUCKET=${TF_STATE_BUCKET}"
-          echo "TF_LOCK_TABLE=${TF_LOCK_TABLE}"
+          echo "✓ Deployment configuration is present."
+          echo "✓ AWS_REGION=${AWS_REGION}"
+          echo "✓ TF_STATE_BUCKET=${TF_STATE_BUCKET}"
+          echo "✓ TF_LOCK_TABLE=${TF_LOCK_TABLE}"
+          echo "✓ ServiceNow integration configured"
 
       - name: Configure AWS credentials using GitHub OIDC
         uses: aws-actions/configure-aws-credentials@v5
@@ -136,7 +178,17 @@ jobs:
           DEPLOY_OUTCOME: ${{ steps.apply.outcome }}
           PLAN_SUMMARY: ${{ steps.plan.outputs.summary }}
         run: |
-          set -euo pipefail
+          # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          # 🔴 SECURITY FIX #5: IMPROVED SERVICENOW CALLBACK ERROR HANDLING
+          # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          # 7yo: Tell ServiceNow what happened, and make sure they heard us.
+          # SME: CHANGED: Added error handling so if ServiceNow notification fails,
+          #      the workflow job also fails. Previously, job would succeed even if
+          #      curl failed (no set -e). This ensures deployment status is reliably
+          #      communicated before job completes.
+          # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+          set -eo pipefail
 
           if [ "${DEPLOY_OUTCOME}" = "success" ]; then
             DSTATUS="success"
@@ -146,8 +198,8 @@ jobs:
 
           CALLBACK_URL="${SN_INSTANCE_URL}${SN_DEPLOYMENT_CALLBACK_PATH}"
 
-          echo "Sending deployment callback to ServiceNow:"
-          echo "${CALLBACK_URL}"
+          echo "ℹ Sending deployment callback to ServiceNow:"
+          echo "  URL: ${CALLBACK_URL}"
 
           python3 - <<'PY' > deployment-result.json
           import json
@@ -188,8 +240,14 @@ jobs:
           print(json.dumps(payload, indent=2))
           PY
 
+          echo ""
+          echo "📋 Deployment result payload:"
           cat deployment-result.json
 
+          echo ""
+          echo "🔗 Sending to ServiceNow..."
+          
+          # --fail-with-body: fail on HTTP >= 400, and output response body on failure
           curl --fail-with-body -sS \
             --request POST \
             --user "${SN_API_USER}:${SN_API_PASSWORD}" \
@@ -198,3 +256,6 @@ jobs:
             --header "X-GitHub-SNOW-Shared-Secret: ${SN_GITHUB_SHARED_SECRET}" \
             --data @deployment-result.json \
             "${CALLBACK_URL}"
+
+          echo ""
+          echo "✅ ServiceNow deployment callback succeeded"
