@@ -9,6 +9,10 @@ permissions:
   pull-requests: write
   statuses: read
 
+concurrency:
+  group: auto-merge-after-snow-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   auto-merge:
     name: auto-merge-after-snow-approval
@@ -102,8 +106,7 @@ jobs:
                   print(result.stderr)
 
                   if result.returncode != 0:
-                      print("Merge failed. GitHub branch protection is still blocking it.")
-                      print("This is expected if terraform-checks, checkov, codeql, gitleaks, review, or branch-up-to-date is not green.")
+                      print("Merge failed. Branch protection is still blocking it.")
                       sys.exit(result.returncode)
 
                   print(f"PR #{number} merged successfully.")
