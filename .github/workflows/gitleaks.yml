@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - main
+
   push:
     branches:
       - main
@@ -12,10 +13,12 @@ on:
       - "fix/**"
       - "bugfix/**"
       - "hotfix/**"
+
   workflow_dispatch:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   gitleaks:
@@ -30,3 +33,5 @@ jobs:
 
       - name: Run Gitleaks
         uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
