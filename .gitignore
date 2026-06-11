@@ -58,3 +58,8 @@ backup*/
 *.disabled
 *.old
 *-backup*
+# Other files
+fix_github_snow_workflows.sh
+github-oidc-trust-policy.json
+github-snow-terraform-deploy-policy.json
+github-snow-trust-policy.json
