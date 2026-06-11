@@ -7,6 +7,12 @@ on:
   push:
     branches:
       - main
+      - "feature/**"
+      - "feature-*"
+      - "fix/**"
+      - "bugfix/**"
+      - "hotfix/**"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,6 +34,3 @@ jobs:
           framework: terraform
           quiet: true
           soft_fail: false
-          skip_path: |
-            terraform/demo-s3
-            **/.terraform/**
