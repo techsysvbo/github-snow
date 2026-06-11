@@ -4,6 +4,13 @@ on:
   pull_request:
     branches:
       - main
+  push:
+    branches:
+      - "feature/**"
+      - "feature-*"
+      - "fix/**"
+      - "bugfix/**"
+      - "hotfix/**"
   workflow_dispatch:
 
 permissions:
