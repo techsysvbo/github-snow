@@ -1,73 +1,94 @@
-# 7yo: After merge, the robot puts on the AWS costume, builds the real toys, and
-#      mails a postcard back to SNOW with the result + the time.
-# SME: push to main only. OIDC assume prod role, init/validate/plan/apply, upload
-#      plan, POST deployment_result to SNOW. Fixes the 5 usual deploy failures.
 name: terraform-deploy-after-merge
+
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
   workflow_dispatch:
+
 permissions:
   id-token: write
   contents: read
   statuses: write
+
 concurrency:
   group: tf-deploy-${{ github.ref }}
   cancel-in-progress: false
+
 jobs:
   deploy:
+    name: terraform-deploy-production
     runs-on: ubuntu-latest
     environment: production
+
     env:
       AWS_REGION: ${{ secrets.AWS_REGION }}
-      TF_ENV_PATH: terraform/environments/prod/s3
+      TF_ENV_PATH: terraform/environments/prod
+
     steps:
       - name: Checkout main
-        uses: actions/checkout@v4
-      - name: Show OIDC subject (debug trust policy)
+        uses: actions/checkout@v5
+
+      - name: Show OIDC subject
         run: |
           echo "repository = ${GITHUB_REPOSITORY}"
           echo "ref        = ${GITHUB_REF}"
           echo "expected sub = repo:${GITHUB_REPOSITORY}:ref:${GITHUB_REF}"
+
       - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v5
         with:
           role-to-assume: ${{ secrets.AWS_PROD_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: gha-prod-deploy-${{ github.run_id }}
-      - name: Verify identity (proves OIDC worked)
+
+      - name: Verify AWS identity
         run: aws sts get-caller-identity
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.9.5
+
       - name: Terraform Init
         working-directory: ${{ env.TF_ENV_PATH }}
         run: terraform init -input=false
+
       - name: Terraform Validate
         working-directory: ${{ env.TF_ENV_PATH }}
         run: terraform validate
+
       - name: Terraform Plan
         id: plan
         working-directory: ${{ env.TF_ENV_PATH }}
         run: |
+          set -euo pipefail
           terraform plan -input=false -out=tfplan
           terraform show -no-color tfplan > plan_summary.txt
-          echo "summary<<EOF2" >> "$GITHUB_OUTPUT"
-          grep -E "Plan:|No changes" plan_summary.txt || echo "Plan: see artifact" >> "$GITHUB_OUTPUT"
-          echo "EOF2" >> "$GITHUB_OUTPUT"
+
+          PLAN_LINE="$(grep -E 'Plan:|No changes' plan_summary.txt | tail -1 || echo 'Plan: see artifact')"
+
+          {
+            echo "summary<<EOF"
+            echo "$PLAN_LINE"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Terraform Apply
         id: apply
         working-directory: ${{ env.TF_ENV_PATH }}
         run: terraform apply -input=false -auto-approve tfplan
-      - name: Upload plan artifact
+
+      - name: Upload Terraform plan artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: terraform-plan-${{ github.run_id }}
           path: ${{ env.TF_ENV_PATH }}/plan_summary.txt
           retention-days: 90
-      - name: Notify ServiceNow (deployment result)
+          if-no-files-found: ignore
+
+      - name: Notify ServiceNow deployment result
         if: always()
         env:
           SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
@@ -78,10 +99,17 @@ jobs:
           SN_OAUTH_USERNAME: ${{ secrets.SN_OAUTH_USERNAME }}
           SN_OAUTH_PASSWORD: ${{ secrets.SN_OAUTH_PASSWORD }}
           SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
-          DEPLOY_STATUS: ${{ steps.apply.outcome }}
+          DEPLOY_OUTCOME: ${{ steps.apply.outcome }}
           PLAN_SUMMARY: ${{ steps.plan.outputs.summary }}
         run: |
           set -euo pipefail
+
+          if [ "${DEPLOY_OUTCOME}" = "success" ]; then
+            DSTATUS="success"
+          else
+            DSTATUS="failure"
+          fi
+
           ACCESS_TOKEN="$(curl -sS -X POST "${SN_OAUTH_TOKEN_URL}" \
             -H 'Content-Type: application/x-www-form-urlencoded' \
             --data-urlencode "grant_type=password" \
@@ -90,15 +118,19 @@ jobs:
             --data-urlencode "username=${SN_OAUTH_USERNAME}" \
             --data-urlencode "password=${SN_OAUTH_PASSWORD}" \
             | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')"
-          if [ "${DEPLOY_STATUS}" = "success" ]; then DSTATUS="success"; else DSTATUS="failure"; fi
-          export DSTATUS
-          PAYLOAD=$(python3 - <<'PY'
-          import json, os, datetime
+
+          PAYLOAD="$(python3 - <<'PY'
+          import json
+          import os
+          import datetime
+
           g = os.environ.get
+
           repo = g("GITHUB_REPOSITORY", "")
           server = g("GITHUB_SERVER_URL", "https://github.com")
           run_id = g("GITHUB_RUN_ID", "")
           sha = g("GITHUB_SHA", "")
+
           payload = {
               "shared_secret": g("SN_GITHUB_SHARED_SECRET", ""),
               "event_type": "deployment_result",
@@ -109,15 +141,17 @@ jobs:
               "deployment_pipeline_url": f"{server}/{repo}/actions/runs/{run_id}",
               "deployment_run_id": run_id,
               "deployment_environment": "production",
-              "workload": "prod-s3",
+              "workload": "prod",
               "region": g("AWS_REGION", "us-east-1"),
               "terraform_plan_summary": " ".join(g("PLAN_SUMMARY", "").split()),
-              "deployment_timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "deployment_timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
           }
+
           print(json.dumps(payload))
           PY
-          )
-          curl -sS -X POST "${SN_INSTANCE_URL}${SN_DEPLOYMENT_CALLBACK_PATH}" \
+          )"
+
+          curl --fail-with-body -sS -X POST "${SN_INSTANCE_URL}${SN_DEPLOYMENT_CALLBACK_PATH}" \
             -H "Authorization: Bearer ${ACCESS_TOKEN}" \
             -H "Content-Type: application/json" \
             -H "Accept: application/json" \
