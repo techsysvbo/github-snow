@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+
   workflow_dispatch:
 
 permissions:
@@ -30,7 +31,39 @@ jobs:
       - name: Checkout main
         uses: actions/checkout@v5
 
-      - name: Configure AWS credentials via OIDC
+      - name: Validate deployment configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          missing="false"
+
+          if [ -z "${AWS_REGION}" ]; then
+            echo "Missing AWS_REGION secret."
+            missing="true"
+          fi
+
+          if [ -z "${TF_STATE_BUCKET}" ]; then
+            echo "Missing TF_STATE_BUCKET repository variable."
+            missing="true"
+          fi
+
+          if [ -z "${TF_LOCK_TABLE}" ]; then
+            echo "Missing TF_LOCK_TABLE repository variable."
+            missing="true"
+          fi
+
+          if [ "${missing}" = "true" ]; then
+            echo "Fix missing GitHub secrets or variables before deployment."
+            exit 1
+          fi
+
+          echo "Deployment configuration is present."
+          echo "AWS_REGION=${AWS_REGION}"
+          echo "TF_STATE_BUCKET=${TF_STATE_BUCKET}"
+          echo "TF_LOCK_TABLE=${TF_LOCK_TABLE}"
+
+      - name: Configure AWS credentials using GitHub OIDC
         uses: aws-actions/configure-aws-credentials@v5
         with:
           role-to-assume: ${{ secrets.AWS_PROD_DEPLOY_ROLE_ARN }}
@@ -48,10 +81,12 @@ jobs:
       - name: Terraform init
         working-directory: ${{ env.TF_ENV_PATH }}
         run: |
+          set -euo pipefail
+
           terraform init -input=false \
-             -backend-config="bucket=${TF_STATE_BUCKET}" \
-             -backend-config="region=${AWS_REGION}" \
-             -backend-config="dynamodb_table=${TF_LOCK_TABLE}"
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=${TF_LOCK_TABLE}"
 
       - name: Terraform validate
         working-directory: ${{ env.TF_ENV_PATH }}
@@ -62,6 +97,7 @@ jobs:
         working-directory: ${{ env.TF_ENV_PATH }}
         run: |
           set -euo pipefail
+
           terraform plan -input=false -out=tfplan
           terraform show -no-color tfplan > plan_summary.txt
 
@@ -89,15 +125,14 @@ jobs:
 
       - name: Notify ServiceNow deployment result
         if: always()
+        shell: bash
         env:
           SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
           SN_DEPLOYMENT_CALLBACK_PATH: ${{ secrets.SN_DEPLOYMENT_CALLBACK_PATH }}
-          SN_OAUTH_TOKEN_URL: ${{ secrets.SN_OAUTH_TOKEN_URL }}
-          SN_OAUTH_CLIENT_ID: ${{ secrets.SN_OAUTH_CLIENT_ID }}
-          SN_OAUTH_CLIENT_SECRET: ${{ secrets.SN_OAUTH_CLIENT_SECRET }}
-          SN_OAUTH_USERNAME: ${{ secrets.SN_OAUTH_USERNAME }}
-          SN_OAUTH_PASSWORD: ${{ secrets.SN_OAUTH_PASSWORD }}
+          SN_API_USER: ${{ secrets.SN_API_USER }}
+          SN_API_PASSWORD: ${{ secrets.SN_API_PASSWORD }}
           SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
+
           DEPLOY_OUTCOME: ${{ steps.apply.outcome }}
           PLAN_SUMMARY: ${{ steps.plan.outputs.summary }}
         run: |
@@ -108,46 +143,58 @@ jobs:
           else
             DSTATUS="failure"
           fi
-          export DSTATUS
 
-          ACCESS_TOKEN="$(curl -sS -X POST "${SN_OAUTH_TOKEN_URL}" \
-            -H 'Content-Type: application/x-www-form-urlencoded' \
-            --data-urlencode "grant_type=password" \
-            --data-urlencode "client_id=${SN_OAUTH_CLIENT_ID}" \
-            --data-urlencode "client_secret=${SN_OAUTH_CLIENT_SECRET}" \
-            --data-urlencode "username=${SN_OAUTH_USERNAME}" \
-            --data-urlencode "password=${SN_OAUTH_PASSWORD}" \
-            | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')"
+          CALLBACK_URL="${SN_INSTANCE_URL}${SN_DEPLOYMENT_CALLBACK_PATH}"
 
-          PAYLOAD="$(python3 - <<'PY'
-          import json, os, datetime
+          echo "Sending deployment callback to ServiceNow:"
+          echo "${CALLBACK_URL}"
+
+          python3 - <<'PY' > deployment-result.json
+          import json
+          import os
+          import datetime
 
           g = os.environ.get
-          repo = g("GITHUB_REPOSITORY", "")
+
+          repo_full = g("GITHUB_REPOSITORY", "")
+          owner = repo_full.split("/")[0] if "/" in repo_full else ""
+          repo = repo_full.split("/")[1] if "/" in repo_full else repo_full
           server = g("GITHUB_SERVER_URL", "https://github.com")
           run_id = g("GITHUB_RUN_ID", "")
           sha = g("GITHUB_SHA", "")
 
-          print(json.dumps({
+          payload = {
               "shared_secret": g("SN_GITHUB_SHARED_SECRET", ""),
               "event_type": "deployment_result",
-              "deployment_status": g("DSTATUS", "failure"),
-              "repo_name": repo,
+
+              "repo_name": repo_full,
+              "owner": owner,
+              "repo": repo,
+
               "commit_sha": sha,
               "merge_commit_sha": sha,
-              "deployment_pipeline_url": f"{server}/{repo}/actions/runs/{run_id}",
-              "deployment_run_id": run_id,
-              "deployment_environment": "production",
-              "workload": "prod",
-              "region": g("AWS_REGION", "us-east-1"),
-              "terraform_plan_summary": " ".join(g("PLAN_SUMMARY", "").split()),
-              "deployment_timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-          }))
-          PY
-          )"
 
-          curl --fail-with-body -sS -X POST "${SN_INSTANCE_URL}${SN_DEPLOYMENT_CALLBACK_PATH}" \
-            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -H "Accept: application/json" \
-            -d "${PAYLOAD}"
+              "deployment_status": g("DSTATUS", "failure"),
+              "deployment_environment": "production",
+              "deployment_pipeline_url": f"{server}/{repo_full}/actions/runs/{run_id}",
+              "deployment_run_id": run_id,
+              "deployment_timestamp": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+
+              "terraform_plan_summary": " ".join(g("PLAN_SUMMARY", "").split()) or "Terraform plan was not generated.",
+              "callback_source": "github_actions_terraform_deploy_after_merge",
+              "aws_region": g("AWS_REGION", "")
+          }
+
+          print(json.dumps(payload, indent=2))
+          PY
+
+          cat deployment-result.json
+
+          curl --fail-with-body -sS \
+            --request POST \
+            --user "${SN_API_USER}:${SN_API_PASSWORD}" \
+            --header "Content-Type: application/json" \
+            --header "Accept: application/json" \
+            --header "X-GitHub-SNOW-Shared-Secret: ${SN_GITHUB_SHARED_SECRET}" \
+            --data @deployment-result.json \
+            "${CALLBACK_URL}"

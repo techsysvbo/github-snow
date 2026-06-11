@@ -7,7 +7,6 @@ on:
 
   push:
     branches:
-      - main
       - "feature/**"
       - "feature-*"
       - "fix/**"
@@ -31,7 +30,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Run Gitleaks
+      - name: Run Gitleaks secret scan
         uses: gitleaks/gitleaks-action@v2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITLEAKS_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
