@@ -4,14 +4,15 @@ on:
   pull_request:
     branches:
       - main
+
   push:
     branches:
-      - main
       - "feature/**"
       - "feature-*"
       - "fix/**"
       - "bugfix/**"
       - "hotfix/**"
+
   workflow_dispatch:
 
 permissions:
@@ -27,7 +28,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Run Checkov
+      - name: Run Checkov IaC scan
         uses: bridgecrewio/checkov-action@v12
         with:
           directory: terraform

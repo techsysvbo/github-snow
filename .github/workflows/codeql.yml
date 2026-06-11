@@ -4,14 +4,15 @@ on:
   pull_request:
     branches:
       - main
+
   push:
     branches:
-      - main
       - "feature/**"
       - "feature-*"
       - "fix/**"
       - "bugfix/**"
       - "hotfix/**"
+
   workflow_dispatch:
 
 permissions:
@@ -24,12 +25,13 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       has_code: ${{ steps.detect.outputs.has_code }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
 
       - id: detect
-        name: Detect analyzable source
+        name: Detect source code for CodeQL
         shell: bash
         run: |
           if find . -path ./.git -prune -o \
@@ -38,7 +40,7 @@ jobs:
             echo "has_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
-            echo "No analyzable source found. CodeQL will no-op and pass."
+            echo "No JS, TS, Python, or Go source found. CodeQL analysis will be skipped."
           fi
 
   analyze:
@@ -46,11 +48,13 @@ jobs:
     needs: detect
     if: needs.detect.outputs.has_code == 'true'
     runs-on: ubuntu-latest
+
     strategy:
       fail-fast: false
       matrix:
         language:
           - javascript-typescript
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -60,7 +64,7 @@ jobs:
         with:
           languages: ${{ matrix.language }}
 
-      - name: Run CodeQL analyze
+      - name: Run CodeQL analysis
         uses: github/codeql-action/analyze@v4
 
   codeql:
@@ -70,8 +74,9 @@ jobs:
       - analyze
     if: always()
     runs-on: ubuntu-latest
+
     steps:
-      - name: CodeQL gate result
+      - name: Final CodeQL gate
         shell: bash
         run: |
           if [ "${{ needs.detect.outputs.has_code }}" = "true" ] && [ "${{ needs.analyze.result }}" != "success" ]; then
