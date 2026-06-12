@@ -39,38 +39,27 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Get all check suite statuses and conclusions
-          STATUSES=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-suites?per_page=100" --jq '.check_suites[].status')
-          CONCLUSIONS=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-suites?per_page=100" --jq '.check_suites[].conclusion')
+          # Get check suites and their statuses
+          CHECK_DATA=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-suites?per_page=100" --jq '.check_suites[] | {status, conclusion}')
+          
+          PENDING=$(echo "$CHECK_DATA" | jq -r 'select(.status != "completed")' | wc -l)
+          FAILURES=$(echo "$CHECK_DATA" | jq -r 'select(.conclusion | test("failure|timed_out|cancelled|action_required"))' | wc -l)
 
-          echo "Individual check suite statuses:"
-          echo "${STATUSES}"
-          echo ""
-          echo "Individual check suite conclusions:"
-          echo "${CONCLUSIONS}"
-
-          # Check if any status is NOT 'completed'
-          if echo "${STATUSES}" | grep -vE "^completed$"; then
-            echo ""
-            echo "ERROR: Not all check suites are completed. Some are still in_progress or queued."
+          if [ "$PENDING" -gt 0 ]; then
+            echo "⏳ Waiting for checks to complete ($PENDING check suites still in progress)"
             exit 1
           fi
 
-          # Check if any conclusion is a failure state
-          if echo "${CONCLUSIONS}" | grep -Eq "failure|timed_out|cancelled|action_required|neutral|startup_failure"; then
-            echo ""
-            echo "ERROR: One or more check suites concluded with a non-success state."
+          if [ "$FAILURES" -gt 0 ]; then
+            echo "❌ ERROR: One or more check suites failed"
             exit 1
           fi
 
-          # Verify combined status is success
           if [ "${GH_CHECK_STATE}" != "success" ]; then
-            echo ""
-            echo "ERROR: Combined commit status is not success: ${GH_CHECK_STATE}"
+            echo "❌ ERROR: Combined commit status is not success: ${GH_CHECK_STATE}"
             exit 1
           fi
 
-          echo ""
           echo "✓ All GitHub checks are complete and successful"
 
       - name: Get ServiceNow OAuth token
