@@ -39,24 +39,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Get check suites and their statuses
-          CHECK_DATA=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-suites?per_page=100" --jq '.check_suites[] | {status, conclusion}')
-          
-          PENDING=$(echo "$CHECK_DATA" | jq -r 'select(.status != "completed")' | wc -l)
-          FAILURES=$(echo "$CHECK_DATA" | jq -r 'select(.conclusion | test("failure|timed_out|cancelled|action_required"))' | wc -l)
-
-          if [ "$PENDING" -gt 0 ]; then
-            echo "⏳ Waiting for checks to complete ($PENDING check suites still in progress)"
-            exit 1
-          fi
-
-          if [ "$FAILURES" -gt 0 ]; then
-            echo "❌ ERROR: One or more check suites failed"
-            exit 1
-          fi
-
           if [ "${GH_CHECK_STATE}" != "success" ]; then
-            echo "❌ ERROR: Combined commit status is not success: ${GH_CHECK_STATE}"
+            echo "❌ ERROR: GitHub checks have not finished successfully"
+            echo "Current combined status: ${GH_CHECK_STATE}"
+            echo ""
+            echo "GitHub combined status aggregates all check suites."
+            echo "Wait for all checks to complete before approval."
             exit 1
           fi
 
