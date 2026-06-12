@@ -35,28 +35,43 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ github.event.pull_request.head.sha }}
+          GH_CHECK_STATE: ${{ steps.checks.outputs.github_check_status }}
         run: |
           set -euo pipefail
 
-          CHECK_SUITE_STATUS=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-suites?per_page=100" --jq '.check_suites[].status' | sort | uniq | tr '\n' ',')
-          CHECK_SUITE_CONCLUSIONS=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-suites?per_page=100" --jq '.check_suites[].conclusion' | sort | uniq | tr '\n' ',')
-          echo "Check suite statuses: ${CHECK_SUITE_STATUS}"
-          echo "Check suite conclusions: ${CHECK_SUITE_CONCLUSIONS}"
+          # Get all check suite statuses and conclusions
+          STATUSES=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-suites?per_page=100" --jq '.check_suites[].status')
+          CONCLUSIONS=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-suites?per_page=100" --jq '.check_suites[].conclusion')
 
-          if echo "${CHECK_SUITE_STATUS}" | grep -qv "completed"; then
-            echo "One or more check suites are not yet completed."
+          echo "Individual check suite statuses:"
+          echo "${STATUSES}"
+          echo ""
+          echo "Individual check suite conclusions:"
+          echo "${CONCLUSIONS}"
+
+          # Check if any status is NOT 'completed'
+          if echo "${STATUSES}" | grep -vE "^completed$"; then
+            echo ""
+            echo "ERROR: Not all check suites are completed. Some are still in_progress or queued."
             exit 1
           fi
 
-          if echo "${CHECK_SUITE_CONCLUSIONS}" | grep -Eq "(failure|timed_out|cancelled|action_required|neutral|startup_failure)"; then
-            echo "One or more check suites concluded with a non-success state."
+          # Check if any conclusion is a failure state
+          if echo "${CONCLUSIONS}" | grep -Eq "failure|timed_out|cancelled|action_required|neutral|startup_failure"; then
+            echo ""
+            echo "ERROR: One or more check suites concluded with a non-success state."
             exit 1
           fi
 
-          if [ "${STATE}" != "success" ]; then
-            echo "Combined commit status is not success: ${STATE}"
+          # Verify combined status is success
+          if [ "${GH_CHECK_STATE}" != "success" ]; then
+            echo ""
+            echo "ERROR: Combined commit status is not success: ${GH_CHECK_STATE}"
             exit 1
           fi
+
+          echo ""
+          echo "✓ All GitHub checks are complete and successful"
 
       - name: Get ServiceNow OAuth token
         id: token
