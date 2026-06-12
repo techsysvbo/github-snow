@@ -31,6 +31,33 @@ jobs:
           STATE=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/status" --jq '.state')
           echo "github_check_status=${STATE}" >> "$GITHUB_OUTPUT"
 
+      - name: Validate GitHub checks are complete and successful
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          CHECK_SUITE_STATUS=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-suites?per_page=100" --jq '.check_suites[].status' | sort | uniq | tr '\n' ',')
+          CHECK_SUITE_CONCLUSIONS=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-suites?per_page=100" --jq '.check_suites[].conclusion' | sort | uniq | tr '\n' ',')
+          echo "Check suite statuses: ${CHECK_SUITE_STATUS}"
+          echo "Check suite conclusions: ${CHECK_SUITE_CONCLUSIONS}"
+
+          if echo "${CHECK_SUITE_STATUS}" | grep -qv "completed"; then
+            echo "One or more check suites are not yet completed."
+            exit 1
+          fi
+
+          if echo "${CHECK_SUITE_CONCLUSIONS}" | grep -Eq "(failure|timed_out|cancelled|action_required|neutral|startup_failure)"; then
+            echo "One or more check suites concluded with a non-success state."
+            exit 1
+          fi
+
+          if [ "${STATE}" != "success" ]; then
+            echo "Combined commit status is not success: ${STATE}"
+            exit 1
+          fi
+
       - name: Get ServiceNow OAuth token
         id: token
         env:
@@ -84,16 +111,40 @@ jobs:
           echo "::add-mask::${ACCESS_TOKEN}"
           echo "token=${ACCESS_TOKEN}" >> "$GITHUB_OUTPUT"
 
+      - id: collect-pr-details
+        name: Collect PR details
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          PR_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.')
+          printf 'PR_JSON<<EOF\n%s\nEOF\n' "$PR_JSON" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure GitHub checks are successful before notifying ServiceNow
+        env:
+          GH_CHECK_STATUS: ${{ steps.checks.outputs.github_check_status }}
+        run: |
+          set -euo pipefail
+          if [ "${GH_CHECK_STATUS}" != "success" ]; then
+            echo "GitHub checks have not finished successfully. Approval cannot be sent to ServiceNow."
+            echo "Current status: ${GH_CHECK_STATUS}"
+            exit 1
+          fi
+
       - name: Build enriched approval payload
         env:
           SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
           GH_CHECK_STATUS: ${{ steps.checks.outputs.github_check_status }}
+          PR_JSON: ${{ steps.collect-pr-details.outputs.PR_JSON }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
           SRC_BRANCH: ${{ github.event.pull_request.head.ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REQUESTER: ${{ github.event.pull_request.user.login }}
           APPROVER: ${{ github.event.review.user.login }}
+          REVIEW_BODY: ${{ github.event.review.body }}
           CMDB_CI_NAME: ${{ secrets.CMDB_CI_NAME }}
         run: |
           set -euo pipefail
@@ -107,8 +158,9 @@ jobs:
           now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
           end = (datetime.datetime.utcnow() + datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+          pr_data = json.loads(g("PR_JSON", "{}"))
           repo = g("GITHUB_REPOSITORY", "")
-          owner, name = repo.split("/")
+          owner, name = repo.split("/") if "/" in repo else (repo, "")
           server = g("GITHUB_SERVER_URL", "https://github.com")
           run_id = g("GITHUB_RUN_ID", "")
           pr_number = int(g("PR_NUMBER", "0"))
@@ -123,17 +175,24 @@ jobs:
 
             "pr_number": pr_number,
             "pr_link": f"{server}/{repo}/pull/{pr_number}",
-            "pr_title": g("PR_TITLE", ""),
-            "source_branch": g("SRC_BRANCH", ""),
-            "target_branch": "main",
-            "commit_sha": g("HEAD_SHA", ""),
+            "pr_title": pr_data.get("title", ""),
+            "source_branch": pr_data.get("head", {}).get("ref", ""),
+            "target_branch": pr_data.get("base", {}).get("ref", ""),
+            "commit_sha": pr_data.get("head", {}).get("sha", ""),
+            "pr_author": pr_data.get("user", {}).get("login", ""),
+            "pr_state": pr_data.get("state", ""),
+            "mergeable": pr_data.get("mergeable"),
+            "mergeable_state": pr_data.get("mergeable_state", ""),
+            "pr_url": pr_data.get("html_url", ""),
 
             "requester": g("REQUESTER", ""),
             "requestor_github_username": g("REQUESTER", ""),
+            "requested_by": g("REQUESTER", ""),
             "requestor_email": "FROM_PR_COMMENT_OR_OKTA_MAPPING",
 
             "approvers": [g("APPROVER", "")],
             "sme_approval_1": g("APPROVER", ""),
+            "approval_notes": g("REVIEW_BODY", ""),
 
             "status": "waiting_for_snow",
             "approval_state": "requested",
@@ -149,6 +208,7 @@ jobs:
 
             "pipeline_run_id": run_id,
             "pipeline_url": f"{server}/{repo}/actions/runs/{run_id}",
+            "artifact_url": f"{server}/{repo}/actions/runs/{run_id}",
 
             "environment": "production",
             "cmdb_ci_name": g("CMDB_CI_NAME", ""),

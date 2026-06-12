@@ -43,36 +43,20 @@ jobs:
 
           missing="false"
 
-          # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-          # 🔴 SECURITY FIX #3: AWS CONFIGURATION VALIDATION
-          # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-          # 7yo: Check we have all the magic passwords before we start.
-          # SME: Validates AWS credentials and Terraform backend variables exist.
-          # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-          if [ -z "${AWS_REGION}" ]; then
+          if [ -z "${AWS_REGION:-}" ]; then
             echo "Missing AWS_REGION secret."
             missing="true"
           fi
 
-          if [ -z "${TF_STATE_BUCKET}" ]; then
+          if [ -z "${TF_STATE_BUCKET:-}" ]; then
             echo "Missing TF_STATE_BUCKET repository variable."
             missing="true"
           fi
 
-          if [ -z "${TF_LOCK_TABLE}" ]; then
+          if [ -z "${TF_LOCK_TABLE:-}" ]; then
             echo "Missing TF_LOCK_TABLE repository variable."
             missing="true"
           fi
-
-          # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-          # 🔴 SECURITY FIX #4: SERVICENOW CALLBACK VALIDATION
-          # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-          # 7yo: Check we can talk to ServiceNow before we deploy anything.
-          # SME: ADDED: Early validation of ServiceNow secrets to fail fast.
-          #      Previously failed at curl step (near end of job). Now fails early,
-          #      saving time and preventing partial deployments from being notified.
-          # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
           if [ -z "${SN_INSTANCE_URL:-}" ]; then
             echo "Missing SN_INSTANCE_URL secret."
@@ -105,10 +89,9 @@ jobs:
           fi
 
           echo "✓ Deployment configuration is present."
-          echo "✓ AWS_REGION=${AWS_REGION}"
-          echo "✓ TF_STATE_BUCKET=${TF_STATE_BUCKET}"
-          echo "✓ TF_LOCK_TABLE=${TF_LOCK_TABLE}"
-          echo "✓ ServiceNow integration configured"
+          echo "AWS_REGION=${AWS_REGION}"
+          echo "TF_STATE_BUCKET=${TF_STATE_BUCKET}"
+          echo "TF_LOCK_TABLE=${TF_LOCK_TABLE}"
 
       - name: Configure AWS credentials using GitHub OIDC
         uses: aws-actions/configure-aws-credentials@v5
@@ -179,26 +162,17 @@ jobs:
           SN_API_USER: ${{ secrets.SN_API_USER }}
           SN_API_PASSWORD: ${{ secrets.SN_API_PASSWORD }}
           SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
-
           DEPLOY_OUTCOME: ${{ steps.apply.outcome }}
           PLAN_SUMMARY: ${{ steps.plan.outputs.summary }}
         run: |
-          # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-          # 🔴 SECURITY FIX #5: IMPROVED SERVICENOW CALLBACK ERROR HANDLING
-          # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-          # 7yo: Tell ServiceNow what happened, and make sure they heard us.
-          # SME: CHANGED: Added error handling so if ServiceNow notification fails,
-          #      the workflow job also fails. Previously, job would succeed even if
-          #      curl failed (no set -e). This ensures deployment status is reliably
-          #      communicated before job completes.
-          # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-          set -eo pipefail
+          set -euo pipefail
 
           if [ "${DEPLOY_OUTCOME}" = "success" ]; then
-            DSTATUS="success"
+            export DSTATUS="success"
+            export DMSG="Terraform apply succeeded."
           else
-            DSTATUS="failure"
+            export DSTATUS="failure"
+            export DMSG="Terraform apply failed or was skipped."
           fi
 
           CALLBACK_URL="${SN_INSTANCE_URL}${SN_DEPLOYMENT_CALLBACK_PATH}"
@@ -219,6 +193,7 @@ jobs:
           server = g("GITHUB_SERVER_URL", "https://github.com")
           run_id = g("GITHUB_RUN_ID", "")
           sha = g("GITHUB_SHA", "")
+          now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
           payload = {
               "shared_secret": g("SN_GITHUB_SHARED_SECRET", ""),
@@ -232,10 +207,16 @@ jobs:
               "merge_commit_sha": sha,
 
               "deployment_status": g("DSTATUS", "failure"),
+              "deployment_message": g("DMSG", ""),
               "deployment_environment": "production",
               "deployment_pipeline_url": f"{server}/{repo_full}/actions/runs/{run_id}",
               "deployment_run_id": run_id,
-              "deployment_timestamp": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "deployment_timestamp": now,
+              "closed_at": now,
+              "artifact_url": f"{server}/{repo_full}/actions/runs/{run_id}",
+              "deployment_check_status": g("DSTATUS", "failure"),
+              "deployment_check_result": g("DSTATUS", "failure"),
+              "deployment_callback_attempts": 1,
 
               "terraform_plan_summary": " ".join(g("PLAN_SUMMARY", "").split()) or "Terraform plan was not generated.",
               "callback_source": "github_actions_terraform_deploy_after_merge",
@@ -251,8 +232,7 @@ jobs:
 
           echo ""
           echo "🔗 Sending to ServiceNow..."
-          
-          # --fail-with-body: fail on HTTP >= 400, and output response body on failure
+
           curl --fail-with-body -sS \
             --request POST \
             --user "${SN_API_USER}:${SN_API_PASSWORD}" \
