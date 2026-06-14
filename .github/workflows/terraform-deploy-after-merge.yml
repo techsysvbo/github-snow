@@ -4,12 +4,14 @@ on:
   push:
     branches:
       - main
-
   workflow_dispatch:
 
 permissions:
   id-token: write
   contents: read
+  pull-requests: read
+  actions: read
+  checks: read
 
 concurrency:
   group: tf-deploy-${{ github.ref }}
@@ -36,6 +38,201 @@ jobs:
       - name: Checkout main
         uses: actions/checkout@v5
 
+      - name: Collect merged PR metadata
+        id: pr_meta
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" > merged-prs.json
+
+          python3 <<'PY' > pr-meta-outputs.txt
+          import json
+          from pathlib import Path
+
+          data = json.loads(Path("merged-prs.json").read_text())
+          pr = data[0] if isinstance(data, list) and data else {}
+
+          outputs = {
+              "pr_number": pr.get("number", ""),
+              "pr_link": pr.get("html_url", ""),
+              "pr_title": pr.get("title", ""),
+              "pr_author": pr.get("user", {}).get("login", ""),
+              "pr_state": pr.get("state", ""),
+              "requested_by": pr.get("user", {}).get("login", ""),
+              "source_branch": pr.get("head", {}).get("ref", ""),
+              "target_branch": pr.get("base", {}).get("ref", ""),
+              "head_sha": pr.get("head", {}).get("sha", ""),
+              "mergeable": "" if pr.get("mergeable") is None else str(pr.get("mergeable")).lower(),
+              "mergeable_state": pr.get("mergeable_state", ""),
+              "closed_at": pr.get("closed_at") or "",
+              "merged_at": pr.get("merged_at") or ""
+          }
+
+          for key, value in outputs.items():
+              print(f"{key}<<EOF")
+              print("" if value is None else str(value))
+              print("EOF")
+          PY
+
+          cat pr-meta-outputs.txt >> "$GITHUB_OUTPUT"
+
+      - name: Collect PR GitHub check results
+        id: github_checks
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_HEAD_SHA: ${{ steps.pr_meta.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${PR_HEAD_SHA:-}" ]; then
+            {
+              echo "github_checks_status<<EOF"
+              echo "unknown"
+              echo "EOF"
+              echo "checkov_scan_result<<EOF"
+              echo "UNKNOWN"
+              echo "EOF"
+              echo "codeql_scan_result<<EOF"
+              echo "UNKNOWN"
+              echo "EOF"
+              echo "gitleaks_scan_result<<EOF"
+              echo "UNKNOWN"
+              echo "EOF"
+              echo "terraform_validate<<EOF"
+              echo "UNKNOWN"
+              echo "EOF"
+              echo "security_scan_result<<EOF"
+              echo "UNKNOWN"
+              echo "EOF"
+              echo "github_checks_detail<<EOF"
+              echo "{}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/commits/${PR_HEAD_SHA}/check-runs?per_page=100" > check-runs.json
+
+          python3 <<'PY' > github-checks-outputs.txt
+          import json
+          from pathlib import Path
+
+          checks_payload = json.loads(Path("check-runs.json").read_text())
+          check_runs = checks_payload.get("check_runs", [])
+
+          def norm(value):
+              return (value or "").strip().lower()
+
+          def to_result(conclusion, status):
+              conclusion = norm(conclusion)
+              status = norm(status)
+
+              if conclusion == "success":
+                  return "PASSED"
+              if conclusion in ("failure", "cancelled", "timed_out", "action_required", "startup_failure"):
+                  return "FAILED"
+              if conclusion in ("skipped", "neutral"):
+                  return "SKIPPED"
+              if status in ("queued", "in_progress", "waiting", "requested", "pending"):
+                  return "PENDING"
+              return "MISSING"
+
+          def matching_results(matchers):
+              results = []
+              for run in check_runs:
+                  name = norm(run.get("name"))
+                  workflow_name = norm(run.get("check_suite", {}).get("app", {}).get("name"))
+
+                  for matcher in matchers:
+                      matcher = norm(matcher)
+                      if matcher == name or matcher in name or matcher in workflow_name:
+                          results.append({
+                              "name": run.get("name", ""),
+                              "status": run.get("status", ""),
+                              "conclusion": run.get("conclusion", ""),
+                              "result": to_result(run.get("conclusion"), run.get("status")),
+                              "html_url": run.get("html_url", "")
+                          })
+                          break
+              return results
+
+          def single_result(matchers):
+              matches = matching_results(matchers)
+
+              if not matches:
+                  return "MISSING"
+              if any(item["result"] == "FAILED" for item in matches):
+                  return "FAILED"
+              if any(item["result"] in ("PENDING", "MISSING") for item in matches):
+                  return "PENDING"
+              if all(item["result"] in ("PASSED", "SKIPPED") for item in matches):
+                  return "PASSED"
+              return "PENDING"
+
+          checkov = single_result(["checkov"])
+          codeql = single_result(["codeql"])
+          gitleaks = single_result(["gitleaks"])
+          terraform_dev = single_result(["terraform-checks (dev)"])
+          terraform_prod = single_result(["terraform-checks (prod)"])
+
+          required_results = [
+              checkov,
+              codeql,
+              gitleaks,
+              terraform_dev,
+              terraform_prod
+          ]
+
+          if all(item in ("PASSED", "SKIPPED") for item in required_results):
+              github_checks_status = "success"
+          elif any(item == "FAILED" for item in required_results):
+              github_checks_status = "failure"
+          else:
+              github_checks_status = "pending"
+
+          details = {
+              "checkov": checkov,
+              "codeql": codeql,
+              "gitleaks": gitleaks,
+              "terraform_checks_dev": terraform_dev,
+              "terraform_checks_prod": terraform_prod,
+              "check_runs": [
+                  {
+                      "name": run.get("name", ""),
+                      "status": run.get("status", ""),
+                      "conclusion": run.get("conclusion", ""),
+                      "html_url": run.get("html_url", "")
+                  }
+                  for run in check_runs
+              ]
+          }
+
+          outputs = {
+              "github_checks_status": github_checks_status,
+              "checkov_scan_result": checkov,
+              "codeql_scan_result": codeql,
+              "gitleaks_scan_result": gitleaks,
+              "terraform_validate": "PASSED" if terraform_dev in ("PASSED", "SKIPPED") and terraform_prod in ("PASSED", "SKIPPED") else "FAILED",
+              "security_scan_result": "PASSED" if checkov in ("PASSED", "SKIPPED") and codeql in ("PASSED", "SKIPPED") and gitleaks in ("PASSED", "SKIPPED") else "FAILED",
+              "github_checks_detail": json.dumps(details, separators=(",", ":"))
+          }
+
+          for key, value in outputs.items():
+              print(f"{key}<<EOF")
+              print("" if value is None else str(value))
+              print("EOF")
+          PY
+
+          cat github-checks-outputs.txt >> "$GITHUB_OUTPUT"
+
       - name: Validate deployment configuration
         shell: bash
         run: |
@@ -43,52 +240,19 @@ jobs:
 
           missing="false"
 
-          if [ -z "${AWS_REGION:-}" ]; then
-            echo "Missing AWS_REGION secret."
-            missing="true"
-          fi
-
-          if [ -z "${TF_STATE_BUCKET:-}" ]; then
-            echo "Missing TF_STATE_BUCKET repository variable."
-            missing="true"
-          fi
-
-          if [ -z "${TF_LOCK_TABLE:-}" ]; then
-            echo "Missing TF_LOCK_TABLE repository variable."
-            missing="true"
-          fi
-
-          if [ -z "${SN_INSTANCE_URL:-}" ]; then
-            echo "Missing SN_INSTANCE_URL secret."
-            missing="true"
-          fi
-
-          if [ -z "${SN_DEPLOYMENT_CALLBACK_PATH:-}" ]; then
-            echo "Missing SN_DEPLOYMENT_CALLBACK_PATH secret."
-            missing="true"
-          fi
-
-          if [ -z "${SN_API_USER:-}" ]; then
-            echo "Missing SN_API_USER secret."
-            missing="true"
-          fi
-
-          if [ -z "${SN_API_PASSWORD:-}" ]; then
-            echo "Missing SN_API_PASSWORD secret."
-            missing="true"
-          fi
-
-          if [ -z "${SN_GITHUB_SHARED_SECRET:-}" ]; then
-            echo "Missing SN_GITHUB_SHARED_SECRET secret."
-            missing="true"
-          fi
+          for item in AWS_REGION TF_STATE_BUCKET TF_LOCK_TABLE SN_INSTANCE_URL SN_DEPLOYMENT_CALLBACK_PATH SN_API_USER SN_API_PASSWORD SN_GITHUB_SHARED_SECRET; do
+            if [ -z "${!item:-}" ]; then
+              echo "Missing required value: ${item}"
+              missing="true"
+            fi
+          done
 
           if [ "${missing}" = "true" ]; then
             echo "Fix missing GitHub secrets or variables before deployment."
             exit 1
           fi
 
-          echo "✓ Deployment configuration is present."
+          echo "Deployment configuration is present."
           echo "AWS_REGION=${AWS_REGION}"
           echo "TF_STATE_BUCKET=${TF_STATE_BUCKET}"
           echo "TF_LOCK_TABLE=${TF_LOCK_TABLE}"
@@ -157,28 +321,43 @@ jobs:
         if: always()
         shell: bash
         env:
-          SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
-          SN_DEPLOYMENT_CALLBACK_PATH: ${{ secrets.SN_DEPLOYMENT_CALLBACK_PATH }}
-          SN_API_USER: ${{ secrets.SN_API_USER }}
-          SN_API_PASSWORD: ${{ secrets.SN_API_PASSWORD }}
-          SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
+          PR_NUMBER: ${{ steps.pr_meta.outputs.pr_number }}
+          PR_LINK: ${{ steps.pr_meta.outputs.pr_link }}
+          PR_TITLE: ${{ steps.pr_meta.outputs.pr_title }}
+          PR_AUTHOR: ${{ steps.pr_meta.outputs.pr_author }}
+          PR_STATE: ${{ steps.pr_meta.outputs.pr_state }}
+          REQUESTED_BY: ${{ steps.pr_meta.outputs.requested_by }}
+          SOURCE_BRANCH: ${{ steps.pr_meta.outputs.source_branch }}
+          TARGET_BRANCH: ${{ steps.pr_meta.outputs.target_branch }}
+          PR_HEAD_SHA: ${{ steps.pr_meta.outputs.head_sha }}
+          MERGEABLE: ${{ steps.pr_meta.outputs.mergeable }}
+          MERGEABLE_STATE: ${{ steps.pr_meta.outputs.mergeable_state }}
+          CLOSED_AT: ${{ steps.pr_meta.outputs.closed_at }}
+          MERGED_AT: ${{ steps.pr_meta.outputs.merged_at }}
+          GITHUB_CHECKS_STATUS: ${{ steps.github_checks.outputs.github_checks_status }}
+          GITHUB_CHECKS_DETAIL: ${{ steps.github_checks.outputs.github_checks_detail }}
+          CHECKOV_SCAN_RESULT: ${{ steps.github_checks.outputs.checkov_scan_result }}
+          CODEQL_SCAN_RESULT: ${{ steps.github_checks.outputs.codeql_scan_result }}
+          GITLEAKS_SCAN_RESULT: ${{ steps.github_checks.outputs.gitleaks_scan_result }}
+          TERRAFORM_VALIDATE: ${{ steps.github_checks.outputs.terraform_validate }}
+          SECURITY_SCAN_RESULT: ${{ steps.github_checks.outputs.security_scan_result }}
           DEPLOY_OUTCOME: ${{ steps.apply.outcome }}
           PLAN_SUMMARY: ${{ steps.plan.outputs.summary }}
         run: |
           set -euo pipefail
 
           if [ "${DEPLOY_OUTCOME}" = "success" ]; then
-            export DSTATUS="success"
-            export DMSG="Terraform apply succeeded."
+            DSTATUS="success"
+            DMSG="Terraform apply succeeded."
           else
-            export DSTATUS="failure"
-            export DMSG="Terraform apply failed or was skipped."
+            DSTATUS="failure"
+            DMSG="Terraform apply failed or was skipped."
           fi
 
-          CALLBACK_URL="${SN_INSTANCE_URL}${SN_DEPLOYMENT_CALLBACK_PATH}"
+          export DSTATUS
+          export DMSG
 
-          echo "ℹ Sending deployment callback to ServiceNow:"
-          echo "  URL: ${CALLBACK_URL}"
+          CALLBACK_URL="${SN_INSTANCE_URL}${SN_DEPLOYMENT_CALLBACK_PATH}"
 
           python3 - <<'PY' > deployment-result.json
           import json
@@ -190,34 +369,51 @@ jobs:
           repo_full = g("GITHUB_REPOSITORY", "")
           owner = repo_full.split("/")[0] if "/" in repo_full else ""
           repo = repo_full.split("/")[1] if "/" in repo_full else repo_full
+
           server = g("GITHUB_SERVER_URL", "https://github.com")
           run_id = g("GITHUB_RUN_ID", "")
-          sha = g("GITHUB_SHA", "")
-          now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+          merge_sha = g("GITHUB_SHA", "")
+          now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+          run_url = f"{server}/{repo_full}/actions/runs/{run_id}"
 
           payload = {
               "shared_secret": g("SN_GITHUB_SHARED_SECRET", ""),
               "event_type": "deployment_result",
-
               "repo_name": repo_full,
               "owner": owner,
               "repo": repo,
-
-              "commit_sha": sha,
-              "merge_commit_sha": sha,
-
+              "pr_number": int(g("PR_NUMBER", "0") or 0),
+              "pr_link": g("PR_LINK", ""),
+              "pr_title": g("PR_TITLE", ""),
+              "source_branch": g("SOURCE_BRANCH", ""),
+              "target_branch": g("TARGET_BRANCH", ""),
+              "pr_author": g("PR_AUTHOR", ""),
+              "pr_state": g("PR_STATE", ""),
+              "requested_by": g("REQUESTED_BY", ""),
+              "mergeable": g("MERGEABLE", ""),
+              "mergeable_state": g("MERGEABLE_STATE", ""),
+              "closed_at": g("CLOSED_AT", ""),
+              "merged_at": g("MERGED_AT", ""),
+              "commit_sha": g("PR_HEAD_SHA", "") or merge_sha,
+              "merge_commit_sha": merge_sha,
+              "github_check_status": g("GITHUB_CHECKS_STATUS", ""),
+              "github_checks_status": g("GITHUB_CHECKS_STATUS", ""),
+              "github_checks_detail": g("GITHUB_CHECKS_DETAIL", ""),
+              "terraform_validate": g("TERRAFORM_VALIDATE", ""),
+              "checkov_scan_result": g("CHECKOV_SCAN_RESULT", ""),
+              "codeql_scan_result": g("CODEQL_SCAN_RESULT", ""),
+              "gitleaks_scan_result": g("GITLEAKS_SCAN_RESULT", ""),
+              "security_scan_result": g("SECURITY_SCAN_RESULT", ""),
               "deployment_status": g("DSTATUS", "failure"),
               "deployment_message": g("DMSG", ""),
               "deployment_environment": "production",
-              "deployment_pipeline_url": f"{server}/{repo_full}/actions/runs/{run_id}",
+              "deployment_pipeline_url": run_url,
               "deployment_run_id": run_id,
               "deployment_timestamp": now,
-              "closed_at": now,
-              "artifact_url": f"{server}/{repo_full}/actions/runs/{run_id}",
-              "deployment_check_status": g("DSTATUS", "failure"),
-              "deployment_check_result": g("DSTATUS", "failure"),
+              "artifact_url": run_url,
+              "github_callback_attempts": 1,
               "deployment_callback_attempts": 1,
-
+              "approval_notes": "Deployment completed from GitHub Actions after PR merge.",
               "terraform_plan_summary": " ".join(g("PLAN_SUMMARY", "").split()) or "Terraform plan was not generated.",
               "callback_source": "github_actions_terraform_deploy_after_merge",
               "aws_region": g("AWS_REGION", "")
@@ -226,12 +422,8 @@ jobs:
           print(json.dumps(payload, indent=2))
           PY
 
-          echo ""
-          echo "📋 Deployment result payload:"
+          echo "Deployment result payload:"
           cat deployment-result.json
-
-          echo ""
-          echo "🔗 Sending to ServiceNow..."
 
           curl --fail-with-body -sS \
             --request POST \
@@ -242,5 +434,4 @@ jobs:
             --data @deployment-result.json \
             "${CALLBACK_URL}"
 
-          echo ""
-          echo "✅ ServiceNow deployment callback succeeded"
+          echo "ServiceNow deployment callback succeeded."
