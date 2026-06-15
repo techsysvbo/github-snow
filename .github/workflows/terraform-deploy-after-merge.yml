@@ -20,7 +20,8 @@ concurrency:
 jobs:
   deploy:
     name: terraform-deploy-production
-    runs-on: ubuntu-latest
+      #runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, snow-github]
     environment: production
 
     env:
