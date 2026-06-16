@@ -23,6 +23,26 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
+      - name: Detect CA bundle path
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+            CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
+          elif [ -f /etc/pki/tls/certs/ca-bundle.crt ]; then
+            CA_BUNDLE="/etc/pki/tls/certs/ca-bundle.crt"
+          else
+            echo "No known CA bundle found."
+            exit 1
+          fi
+
+          echo "SSL_CERT_FILE=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "REQUESTS_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "CURL_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "GIT_SSL_CAINFO=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "NODE_EXTRA_CA_CERTS=${CA_BUNDLE}" >> "$GITHUB_ENV"
+
       - name: Collect PR metadata and GitHub check results
         id: github_data
         shell: bash
@@ -253,7 +273,7 @@ jobs:
         shell: bash
         env:
           SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
-          CMDB_CI_NAME: ${{ secrets.CMDB_CI_NAME }}
+          CMDB_CI_NAME: ${{ vars.CMDB_CI_NAME }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           APPROVER: ${{ github.event.review.user.login }}
           REVIEW_BODY: ${{ github.event.review.body }}
@@ -286,8 +306,8 @@ jobs:
 
           g = os.environ.get
 
-          now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-          end = (datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+          now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+          end = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
           repo_full = g("GITHUB_REPOSITORY", "")
           owner = repo_full.split("/")[0] if "/" in repo_full else ""

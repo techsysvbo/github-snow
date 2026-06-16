@@ -36,6 +36,9 @@ jobs:
           echo "REQUESTS_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
           echo "CURL_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
           echo "GIT_SSL_CAINFO=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "NODE_EXTRA_CA_CERTS=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "AWS_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "PIP_CERT=${CA_BUNDLE}" >> "$GITHUB_ENV"
 
       - name: Install Checkov without Docker
         shell: bash
