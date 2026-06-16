@@ -1,27 +1,32 @@
-# 7yo: If the code changes after SNOW said yes, flip both lights back to yellow.
-# SME: On synchronize/reopened, resets SNOW commit statuses to pending. Binds
-#      approval to a specific SHA (separation of duties / CM-3).
+# Enterprise PR gate reset: bind ServiceNow approval to the current PR head SHA.
+# When a PR is opened, reopened, or changed, the snow-approval context is reset to pending.
+# ServiceNow must later set this exact commit status to success before merge.
+
 name: reset-snow-gates-on-pr-change
+
 on:
   pull_request:
-    types: [ synchronize, reopened ]
-    branches: [ main ]
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
 permissions:
   statuses: write
   contents: read
+
 jobs:
   reset-gates:
-    runs-on: ubuntu-latest
+    name: reset-snow-approval
+    runs-on: [self-hosted, linux, x64, snow-github]
+
     steps:
-      - name: Reset SNOW gates to pending
+      - name: Reset SNOW approval gate to pending
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          for CONTEXT in snow-approval snow-deployment-gate; do
-            gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${SHA}" \
-              -f state=pending \
-              -f context="${CONTEXT}" \
-              -f description="Reset: PR changed, re-approval required in ServiceNow"
-          done
+
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${SHA}" \
+            -f state=pending \
+            -f context="snow-approval" \
+            -f description="Pending: ServiceNow approval required"

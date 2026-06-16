@@ -20,7 +20,7 @@ concurrency:
 jobs:
   deploy:
     name: terraform-deploy-production
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, snow-github]
     environment: production
 
     env:
@@ -37,6 +37,27 @@ jobs:
     steps:
       - name: Checkout main
         uses: actions/checkout@v5
+
+      - name: Detect CA bundle path
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+            CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
+          elif [ -f /etc/pki/tls/certs/ca-bundle.crt ]; then
+            CA_BUNDLE="/etc/pki/tls/certs/ca-bundle.crt"
+          else
+            echo "No known CA bundle found."
+            exit 1
+          fi
+
+          echo "SSL_CERT_FILE=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "REQUESTS_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "CURL_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "GIT_SSL_CAINFO=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "NODE_EXTRA_CA_CERTS=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "AWS_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
 
       - name: Collect merged PR metadata
         id: pr_meta
@@ -271,6 +292,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.9.5
+          terraform_wrapper: false
 
       - name: Terraform init
         working-directory: ${{ env.TF_ENV_PATH }}
@@ -373,7 +395,7 @@ jobs:
           server = g("GITHUB_SERVER_URL", "https://github.com")
           run_id = g("GITHUB_RUN_ID", "")
           merge_sha = g("GITHUB_SHA", "")
-          now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+          now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
           run_url = f"{server}/{repo_full}/actions/runs/{run_id}"
 
           payload = {

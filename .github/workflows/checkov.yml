@@ -4,26 +4,61 @@ on:
   pull_request:
     branches:
       - main
-
   workflow_dispatch:
 
 permissions:
   contents: read
-  security-events: write
 
 jobs:
   checkov:
     name: checkov
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, snow-github]
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
 
+      - name: Detect CA bundle path
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+            CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
+          elif [ -f /etc/pki/tls/certs/ca-bundle.crt ]; then
+            CA_BUNDLE="/etc/pki/tls/certs/ca-bundle.crt"
+          else
+            echo "No known CA bundle found."
+            exit 1
+          fi
+
+          echo "SSL_CERT_FILE=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "REQUESTS_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "CURL_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "GIT_SSL_CAINFO=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "NODE_EXTRA_CA_CERTS=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "AWS_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "PIP_CERT=${CA_BUNDLE}" >> "$GITHUB_ENV"
+
+      - name: Install Checkov without Docker
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 -m venv "${RUNNER_TEMP}/checkov-venv"
+          source "${RUNNER_TEMP}/checkov-venv/bin/activate"
+
+          python -m pip install --upgrade pip
+          python -m pip install "checkov==3.3.1"
+
+          echo "${RUNNER_TEMP}/checkov-venv/bin" >> "$GITHUB_PATH"
+
       - name: Run Checkov IaC scan
-        uses: bridgecrewio/checkov-action@v12
-        with:
-          directory: terraform
-          framework: terraform
-          quiet: true
-          soft_fail: false
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          checkov \
+            --directory terraform \
+            --framework terraform \
+            --quiet
