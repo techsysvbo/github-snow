@@ -42,10 +42,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          python3 -m pip install --user --upgrade pip
-          python3 -m pip install --user "checkov==3.3.1"
+          python3 -m venv "${RUNNER_TEMP}/checkov-venv"
+          source "${RUNNER_TEMP}/checkov-venv/bin/activate"
 
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          python -m pip install --upgrade pip
+          python -m pip install "checkov==3.3.1"
+
+          echo "${RUNNER_TEMP}/checkov-venv/bin" >> "$GITHUB_PATH"
 
       - name: Run Checkov IaC scan
         shell: bash
