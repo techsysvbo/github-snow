@@ -24,56 +24,210 @@ Prayer really really really ...  works
 Master 
 Cluade for CHRIST
 GPT for CHRIST
-##########################
-Please create or assign a dedicated self-hosted runner for repo:
 
-techsysvbo/github-snow
 
-Runner group:
-github-snow-prod-runners
+GitHub Secrets
 
-Runner labels:
-self-hosted
-linux
-x64
-github-snow-prod
+Go to:
 
-Repo access:
-Only allow techsysvbo/github-snow to use this runner group.
+GitHub repo → Settings → Secrets and variables → Actions → Secrets → New repository secret
 
-Network:
-Runner must run from an approved IP/network allowed by the GitHub Enterprise IP allow list.
+Add these:
 
-Required tools:
-git
-gh
-curl
-unzip
-jq
-python3
-pip
-terraform 1.9.5
-awscli
-ca-certificates
-corporate root CA if TLS inspection is used
-###############################
-Hi team,
+AWS_PROD_DEPLOY_ROLE_ARN
+AWS_REGION
 
-We need a dedicated enterprise self-hosted GitHub Actions runner for repo:
+SN_INSTANCE_URL
+SN_API_PATH
+SN_DEPLOYMENT_CALLBACK_PATH
+SN_API_USER
+SN_API_PASSWORD
+SN_GITHUB_SHARED_SECRET
 
-techsysvbo/github-snow
+SN_OAUTH_TOKEN_URL
+SN_OAUTH_CLIENT_ID
+SN_OAUTH_CLIENT_SECRET
+SN_OAUTH_USERNAME
+SN_OAUTH_PASSWORD
 
-Please provision or approve a Linux x64 self-hosted runner with the custom label:
+CMDB_CI_NAME
+GitHub Variables
 
-github-snow
+Go to:
 
-Runner requirements:
-- Runner must be in an approved network or have a fixed outbound IP that is allowed by the GitHub org IP allow list.
-- Runner should be restricted to repo techsysvbo/github-snow only, or placed in a restricted runner group that only this repo can use.
-- Runner should not be shared broadly across unrelated repos.
-- Runner should run as a non-root service account, not root.
-- Runner must have git, gh, jq, curl, unzip, python3, pip, Terraform 1.9.5, Checkov, Gitleaks, AWS CLI, and trusted corporate root CA installed.
-- Please confirm the runner shows Online/Idle in GitHub before we re-run PR checks.
+GitHub repo → Settings → Secrets and variables → Actions → Variables → New repository variable
 
-We also need a fresh runner registration token generated from GitHub UI. The previous token should not be reused.
+Add these:
 
+TF_STATE_BUCKET
+TF_LOCK_TABLE
+How to get each value
+AWS values
+AWS_PROD_DEPLOY_ROLE_ARN
+
+Run:
+
+aws iam get-role \
+  --role-name github-snow-terraform-deploy-role \
+  --query 'Role.Arn' \
+  --output text
+
+Add the output to GitHub secret:
+
+AWS_PROD_DEPLOY_ROLE_ARN
+
+Example format:
+
+arn:aws:iam::<ACCOUNT_ID>:role/github-snow-terraform-deploy-role
+AWS_REGION
+
+Use:
+
+us-east-1
+
+Add it as GitHub secret:
+
+AWS_REGION=us-east-1
+Terraform backend values
+TF_STATE_BUCKET
+
+Run:
+
+echo "github-snow-tfstate-$(aws sts get-caller-identity --query Account --output text)-us-east-1"
+
+Add the output as GitHub variable:
+
+TF_STATE_BUCKET
+
+Example format:
+
+github-snow-tfstate-123456789012-us-east-1
+TF_LOCK_TABLE
+
+Use:
+
+github-snow-tf-locks
+
+Add it as GitHub variable:
+
+TF_LOCK_TABLE=github-snow-tf-locks
+ServiceNow values
+SN_INSTANCE_URL
+
+Use:
+
+https://dev198292.service-now.com
+
+Add it as GitHub secret:
+
+SN_INSTANCE_URL
+SN_API_PATH
+
+Use:
+
+/api/x_2000997_github_0/github_pr_approval/submit
+
+Add it as GitHub secret:
+
+SN_API_PATH
+SN_DEPLOYMENT_CALLBACK_PATH
+
+Use:
+
+/api/x_2000997_github_0/github_pr_approval/deployment-result
+
+Add it as GitHub secret:
+
+SN_DEPLOYMENT_CALLBACK_PATH
+SN_API_USER
+
+Use the ServiceNow API user account username.
+
+Example:
+
+github.integration
+
+Add it as GitHub secret:
+
+SN_API_USER
+SN_API_PASSWORD
+
+Use the password for the ServiceNow API user.
+
+Add it as GitHub secret:
+
+SN_API_PASSWORD
+SN_GITHUB_SHARED_SECRET
+
+Use the same shared secret stored in your ServiceNow system property:
+
+x_2000997_github_0.shared_secret
+
+Add it as GitHub secret:
+
+SN_GITHUB_SHARED_SECRET
+
+Because this secret has been pasted before, rotate it in ServiceNow and GitHub before using it in production.
+
+ServiceNow OAuth values
+
+These are used by:
+
+.github/workflows/send-approved-pr-to-snow.yml
+SN_OAUTH_TOKEN_URL
+
+Use:
+
+https://dev198292.service-now.com/oauth_token.do
+
+Add it as GitHub secret:
+
+SN_OAUTH_TOKEN_URL
+SN_OAUTH_CLIENT_ID
+
+In ServiceNow, go to:
+
+System OAuth → Application Registry
+
+Open your OAuth application and copy:
+
+Client ID
+
+Add it as GitHub secret:
+
+SN_OAUTH_CLIENT_ID
+SN_OAUTH_CLIENT_SECRET
+
+        In the same OAuth application, copy:
+
+        Client Secret
+
+        Add it as GitHub secret:
+
+        SN_OAUTH_CLIENT_SECRET
+        SN_OAUTH_USERNAME
+
+        Use the ServiceNow OAuth/API username.
+
+        Add it as GitHub secret:
+
+SN_OAUTH_USERNAME
+SN_OAUTH_PASSWORD
+
+Use that ServiceNow user’s password.
+
+Add it as GitHub secret:
+
+SN_OAUTH_PASSWORD
+Optional value
+CMDB_CI_NAME
+
+Use your ServiceNow CI name if you have one.
+
+Example:
+
+GitHub-ServiceNow-IaC-Approval
+
+Add it as GitHub secret:
+
+CMDB_CI_NAME
