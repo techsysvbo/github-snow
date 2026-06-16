@@ -1,0 +1,219 @@
+name: snow-simple-send-approved-pr-to-snow
+
+on:
+  pull_request_review:
+    types:
+      - submitted
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  send-simple-payload-to-snow:
+    name: send-simple-payload-to-snow
+
+    if: >-
+      github.event.review.state == 'approved' &&
+      github.event.pull_request.base.ref == 'main' &&
+      startsWith(github.event.pull_request.head.ref, 'feature/snow-simple')
+
+    runs-on: [self-hosted, linux, x64, snow-github]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Detect CA bundle path
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+            CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
+          elif [ -f /etc/pki/tls/certs/ca-bundle.crt ]; then
+            CA_BUNDLE="/etc/pki/tls/certs/ca-bundle.crt"
+          else
+            echo "No known CA bundle found."
+            exit 1
+          fi
+
+          echo "SSL_CERT_FILE=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "REQUESTS_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "CURL_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "GIT_SSL_CAINFO=${CA_BUNDLE}" >> "$GITHUB_ENV"
+
+      - name: Get ServiceNow OAuth token
+        id: token
+        shell: bash
+        env:
+          SN_OAUTH_TOKEN_URL: ${{ secrets.SN_OAUTH_TOKEN_URL }}
+          SN_OAUTH_CLIENT_ID: ${{ secrets.SN_OAUTH_CLIENT_ID }}
+          SN_OAUTH_CLIENT_SECRET: ${{ secrets.SN_OAUTH_CLIENT_SECRET }}
+          SN_OAUTH_USERNAME: ${{ secrets.SN_OAUTH_USERNAME }}
+          SN_OAUTH_PASSWORD: ${{ secrets.SN_OAUTH_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          TOKEN_RESPONSE="$(curl --fail-with-body -sS -X POST "${SN_OAUTH_TOKEN_URL}" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "grant_type=password" \
+            --data-urlencode "client_id=${SN_OAUTH_CLIENT_ID}" \
+            --data-urlencode "client_secret=${SN_OAUTH_CLIENT_SECRET}" \
+            --data-urlencode "username=${SN_OAUTH_USERNAME}" \
+            --data-urlencode "password=${SN_OAUTH_PASSWORD}")"
+
+          ACCESS_TOKEN="$(TOKEN_RESPONSE="${TOKEN_RESPONSE}" python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          raw = os.environ.get("TOKEN_RESPONSE", "")
+
+          try:
+              data = json.loads(raw)
+          except Exception:
+              print("ServiceNow OAuth response was not valid JSON.", file=sys.stderr)
+              print(raw[:500], file=sys.stderr)
+              sys.exit(1)
+
+          token = data.get("access_token")
+
+          if not token:
+              print("ServiceNow OAuth did not return access_token.", file=sys.stderr)
+              print("Response keys:", ", ".join(data.keys()), file=sys.stderr)
+              sys.exit(1)
+
+          print(token)
+          PY
+          )"
+
+          echo "::add-mask::${ACCESS_TOKEN}"
+          echo "token=${ACCESS_TOKEN}" >> "$GITHUB_OUTPUT"
+
+      - name: Build simple comprehensive SNOW payload
+        shell: bash
+        env:
+          SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
+          CMDB_CI_NAME: ${{ secrets.CMDB_CI_NAME }}
+
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_LINK: ${{ github.event.pull_request.html_url }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          SOURCE_BRANCH: ${{ github.event.pull_request.head.ref }}
+          TARGET_BRANCH: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_STATE: ${{ github.event.pull_request.state }}
+          REQUESTED_BY: ${{ github.event.pull_request.user.login }}
+          APPROVER: ${{ github.event.review.user.login }}
+          REVIEW_BODY: ${{ github.event.review.body }}
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY' > snow-simple-payload.json
+          import datetime
+          import json
+          import os
+
+          g = os.environ.get
+
+          now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+          end = (datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+          repo_full = g("GITHUB_REPOSITORY", "")
+          owner = repo_full.split("/")[0] if "/" in repo_full else ""
+          repo = repo_full.split("/")[1] if "/" in repo_full else repo_full
+
+          server = g("GITHUB_SERVER_URL", "https://github.com")
+          run_id = g("GITHUB_RUN_ID", "")
+          run_url = f"{server}/{repo_full}/actions/runs/{run_id}"
+
+          review_body = g("REVIEW_BODY", "").strip()
+          if not review_body:
+              review_body = f"PR approved in GitHub by {g('APPROVER', '')}."
+
+          payload = {
+              "shared_secret": g("SN_GITHUB_SHARED_SECRET", ""),
+              "event_type": "pull_request_ready_for_snow_approval",
+              "payload_mode": "simple_no_github_checks",
+              "owner": owner,
+              "repo": repo,
+              "repo_name": repo_full,
+              "pr_number": int(g("PR_NUMBER", "0") or 0),
+              "pr_link": g("PR_LINK", ""),
+              "pr_title": g("PR_TITLE", ""),
+              "source_branch": g("SOURCE_BRANCH", ""),
+              "target_branch": g("TARGET_BRANCH", ""),
+              "commit_sha": g("HEAD_SHA", ""),
+              "pr_author": g("PR_AUTHOR", ""),
+              "pr_state": g("PR_STATE", ""),
+              "requester": g("REQUESTED_BY", ""),
+              "requested_by": g("REQUESTED_BY", ""),
+              "requestor_github_username": g("REQUESTED_BY", ""),
+              "requestor_email": "FROM_PR_COMMENT_OR_OKTA_MAPPING",
+              "approvers": [g("APPROVER", "")],
+              "sme_approval_1": g("APPROVER", ""),
+              "approval_notes": review_body,
+              "status": "waiting_for_snow",
+              "approval_state": "requested",
+              "status_context": "snow-approval",
+              "deployment_gate_context": "not_used_in_simple_test",
+              "github_check_status": "NOT_EVALUATED",
+              "github_checks_status": "NOT_EVALUATED",
+              "github_checks_detail": json.dumps({
+                  "mode": "simple_test",
+                  "message": "GitHub checks were intentionally not evaluated before sending this payload to ServiceNow."
+              }),
+              "terraform_validate": "NOT_EVALUATED",
+              "checkov_scan_result": "NOT_EVALUATED",
+              "codeql_scan_result": "NOT_EVALUATED",
+              "gitleaks_scan_result": "NOT_EVALUATED",
+              "security_scan_result": "NOT_EVALUATED",
+              "pipeline_run_id": run_id,
+              "pipeline_url": run_url,
+              "artifact_url": run_url,
+              "github_callback_attempts": 0,
+              "deployment_callback_expected": True,
+              "deployment_callback_event_type": "deployment_result",
+              "environment": "production",
+              "cmdb_ci_name": g("CMDB_CI_NAME", ""),
+              "priority": "medium",
+              "risk": "medium",
+              "impact": "medium",
+              "justification": "Simple ServiceNow payload test after SME PR approval. GitHub checks are intentionally not evaluated in this test workflow.",
+              "implementation_plan": "After ServiceNow approval and merge, existing Terraform deployment workflow deploys to AWS and sends deployment callback to ServiceNow.",
+              "impact_summary": "Production-bound Terraform change submitted for ServiceNow approval using simplified metadata-only workflow.",
+              "rollback_plan": "If rejected, do not merge. If deployed and rollback is required, revert the PR or apply the previous known-good Terraform version.",
+              "planned_start_date": now,
+              "planned_end_date": end,
+              "triggered_at": now
+          }
+
+          print(json.dumps(payload, indent=2))
+          PY
+
+          cat snow-simple-payload.json
+
+      - name: Send simple comprehensive payload to ServiceNow
+        shell: bash
+        env:
+          SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
+          SN_API_PATH: ${{ secrets.SN_API_PATH }}
+          BEARER: ${{ steps.token.outputs.token }}
+          SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
+        run: |
+          set -euo pipefail
+
+          URL="${SN_INSTANCE_URL}${SN_API_PATH}"
+
+          curl --fail-with-body -sS \
+            --request POST \
+            --url "${URL}" \
+            --header "Authorization: Bearer ${BEARER}" \
+            --header "Content-Type: application/json" \
+            --header "Accept: application/json" \
+            --header "X-GitHub-SNOW-Shared-Secret: ${SN_GITHUB_SHARED_SECRET}" \
+            --data @snow-simple-payload.json
+
+          echo "Simple comprehensive ServiceNow payload sent successfully."
