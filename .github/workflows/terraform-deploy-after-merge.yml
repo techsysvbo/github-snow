@@ -292,6 +292,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.9.5
+          terraform_wrapper: false
 
       - name: Terraform init
         working-directory: ${{ env.TF_ENV_PATH }}
