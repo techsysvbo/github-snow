@@ -25,6 +25,8 @@ Master
 Cluade for CHRIST
 GPT for CHRIST
 GPT for CHRIST
+GPT for CHRIST
+GPT for CHRIST
 
 
 GitHub Secrets
