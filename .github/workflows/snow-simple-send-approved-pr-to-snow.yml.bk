@@ -174,38 +174,60 @@ jobs:
 
           cat pr-outputs.txt >> "$GITHUB_OUTPUT"
 
-      - name: Send enriched approval payload to ServiceNow
+      - name: Get ServiceNow OAuth token
+        id: token
         shell: bash
         env:
-          SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
-          SN_API_PATH: ${{ secrets.SN_API_PATH }}
-          SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
+          SN_OAUTH_TOKEN_URL: ${{ secrets.SN_OAUTH_TOKEN_URL }}
+          SN_OAUTH_CLIENT_ID: ${{ secrets.SN_OAUTH_CLIENT_ID }}
+          SN_OAUTH_CLIENT_SECRET: ${{ secrets.SN_OAUTH_CLIENT_SECRET }}
+          SN_OAUTH_USERNAME: ${{ secrets.SN_OAUTH_USERNAME }}
+          SN_OAUTH_PASSWORD: ${{ secrets.SN_OAUTH_PASSWORD }}
         run: |
           set -euo pipefail
 
-          for item in SN_INSTANCE_URL SN_API_PATH SN_GITHUB_SHARED_SECRET; do
+          for item in SN_OAUTH_TOKEN_URL SN_OAUTH_CLIENT_ID SN_OAUTH_CLIENT_SECRET SN_OAUTH_USERNAME SN_OAUTH_PASSWORD; do
             if [ -z "${!item:-}" ]; then
               echo "Missing required GitHub secret: ${item}"
               exit 1
             fi
           done
 
-          URL="${SN_INSTANCE_URL}${SN_API_PATH}"
+          TOKEN_RESPONSE="$(curl --fail-with-body -sS -X POST "${SN_OAUTH_TOKEN_URL}" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "grant_type=password" \
+            --data-urlencode "client_id=${SN_OAUTH_CLIENT_ID}" \
+            --data-urlencode "client_secret=${SN_OAUTH_CLIENT_SECRET}" \
+            --data-urlencode "username=${SN_OAUTH_USERNAME}" \
+            --data-urlencode "password=${SN_OAUTH_PASSWORD}")"
 
-          echo "Sending enriched approval payload to ServiceNow:"
-          echo "${URL}"
+          ACCESS_TOKEN="$(TOKEN_RESPONSE="${TOKEN_RESPONSE}" python3 - <<'PY'
+          import json
+          import os
+          import sys
 
-          curl --fail-with-body -sS \
-            --connect-timeout 20 \
-            --max-time 120 \
-            --retry 3 \
-            --retry-delay 5 \
-            --request POST \
-            --url "${URL}" \
-            --header "Content-Type: application/json" \
-            --header "Accept: application/json" \
-            --header "X-GitHub-SNOW-Shared-Secret: ${SN_GITHUB_SHARED_SECRET}" \
-            --data @snow-payload.json
+          raw = os.environ.get("TOKEN_RESPONSE", "")
+
+          try:
+              data = json.loads(raw)
+          except Exception:
+              print("ServiceNow OAuth response was not valid JSON.", file=sys.stderr)
+              print(raw[:500], file=sys.stderr)
+              sys.exit(1)
+
+          token = data.get("access_token")
+
+          if not token:
+              print("ServiceNow OAuth did not return access_token.", file=sys.stderr)
+              print("Response keys:", ", ".join(data.keys()), file=sys.stderr)
+              sys.exit(1)
+
+          print(token)
+          PY
+          )"
+
+          echo "::add-mask::${ACCESS_TOKEN}"
+          echo "token=${ACCESS_TOKEN}" >> "$GITHUB_OUTPUT"
 
       - name: Build static pass ServiceNow payload
         shell: bash
