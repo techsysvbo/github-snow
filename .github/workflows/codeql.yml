@@ -4,12 +4,13 @@ on:
   pull_request:
     branches:
       - main
+    types: [opened, synchronize, reopened]
+
   workflow_dispatch:
 
 permissions:
   contents: read
   security-events: write
-  actions: read
 
 jobs:
   detect:
@@ -30,12 +31,12 @@ jobs:
           set -euo pipefail
 
           if find . -path ./.git -prune -o \
-               \( -name '*.js' -o -name '*.ts' -o -name '*.py' -o -name '*.go' \) -print \
-               | grep -q .; then
+            \( -name '*.js' -o -name '*.ts' -o -name '*.py' -o -name '*.go' \) \
+            -print | grep -q .; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
-            echo "No JS, TS, Python, or Go source found. CodeQL analysis will be skipped."
+            echo "No supported source code found. CodeQL analysis will be skipped."
           fi
 
   analyze:
@@ -49,13 +50,12 @@ jobs:
       matrix:
         language:
           - javascript-typescript
-          - python
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Detect CA bundle path
+      - name: Configure CA bundle
         shell: bash
         run: |
           set -euo pipefail
@@ -65,14 +65,10 @@ jobs:
           elif [ -f /etc/pki/tls/certs/ca-bundle.crt ]; then
             CA_BUNDLE="/etc/pki/tls/certs/ca-bundle.crt"
           else
-            echo "No known CA bundle found."
+            echo "No trusted CA bundle found on the runner."
             exit 1
           fi
 
-          echo "SSL_CERT_FILE=${CA_BUNDLE}" >> "$GITHUB_ENV"
-          echo "REQUESTS_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
-          echo "CURL_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
-          echo "GIT_SSL_CAINFO=${CA_BUNDLE}" >> "$GITHUB_ENV"
           echo "NODE_EXTRA_CA_CERTS=${CA_BUNDLE}" >> "$GITHUB_ENV"
 
       - name: Initialize CodeQL
@@ -80,7 +76,7 @@ jobs:
         with:
           languages: ${{ matrix.language }}
 
-      - name: Perform CodeQL analysis
+      - name: Run CodeQL analysis
         uses: github/codeql-action/analyze@v4
 
   codeql:
@@ -97,7 +93,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ "${{ needs.detect.outputs.has_code }}" = "true" ] && [ "${{ needs.analyze.result }}" != "success" ]; then
+          if [ "${{ needs.detect.outputs.has_code }}" = "true" ] && \
+             [ "${{ needs.analyze.result }}" != "success" ]; then
             echo "CodeQL analysis failed."
             exit 1
           fi

@@ -4,6 +4,8 @@ on:
   pull_request:
     branches:
       - main
+    types: [opened, synchronize, reopened]
+
   workflow_dispatch:
 
 permissions:
@@ -18,7 +20,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Detect CA bundle path
+      - name: Configure CA bundle
         shell: bash
         run: |
           set -euo pipefail
@@ -28,37 +30,35 @@ jobs:
           elif [ -f /etc/pki/tls/certs/ca-bundle.crt ]; then
             CA_BUNDLE="/etc/pki/tls/certs/ca-bundle.crt"
           else
-            echo "No known CA bundle found."
+            echo "No trusted CA bundle found on the runner."
             exit 1
           fi
 
           echo "SSL_CERT_FILE=${CA_BUNDLE}" >> "$GITHUB_ENV"
           echo "REQUESTS_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
           echo "CURL_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
-          echo "GIT_SSL_CAINFO=${CA_BUNDLE}" >> "$GITHUB_ENV"
-          echo "NODE_EXTRA_CA_CERTS=${CA_BUNDLE}" >> "$GITHUB_ENV"
-          echo "AWS_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
-          echo "PIP_CERT=${CA_BUNDLE}" >> "$GITHUB_ENV"
 
-      - name: Install Checkov without Docker
+      - name: Install Checkov
         shell: bash
         run: |
           set -euo pipefail
 
-          python3 -m venv "${RUNNER_TEMP}/checkov-venv"
-          source "${RUNNER_TEMP}/checkov-venv/bin/activate"
+          CHECKOV_VENV="${RUNNER_TEMP}/checkov-venv"
 
-          python -m pip install --upgrade pip
-          python -m pip install "checkov==3.3.1"
+          rm -rf "${CHECKOV_VENV}"
+          python3 -m venv "${CHECKOV_VENV}"
 
-          echo "${RUNNER_TEMP}/checkov-venv/bin" >> "$GITHUB_PATH"
+          "${CHECKOV_VENV}/bin/python" -m pip install --upgrade pip
+          "${CHECKOV_VENV}/bin/python" -m pip install "checkov==3.3.1"
+
+          echo "CHECKOV_BIN=${CHECKOV_VENV}/bin/checkov" >> "$GITHUB_ENV"
 
       - name: Run Checkov IaC scan
         shell: bash
         run: |
           set -euo pipefail
 
-          checkov \
+          "${CHECKOV_BIN}" \
             --directory terraform \
             --framework terraform \
             --quiet
