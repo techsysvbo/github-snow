@@ -24,7 +24,7 @@ Prayer really really really ...  works
 Master 
 Cluade for CHRIST
 GPT for CHRIST
-CHATGPT for MY LORD JESUS 
+GPT for CHRIST
 
 
 GitHub Secrets
