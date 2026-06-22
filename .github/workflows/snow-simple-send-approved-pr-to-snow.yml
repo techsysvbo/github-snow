@@ -5,146 +5,250 @@ on:
     types:
       - submitted
 
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to send to ServiceNow"
+        required: true
+        type: string
+
 permissions:
   contents: read
   pull-requests: read
-  statuses: write
+  checks: read
+  statuses: read
 
 jobs:
-  send-static-pass-payload-to-snow:
-    name: send-static-pass-payload-to-snow
+  send-custom-payload-to-snow:
+    name: send-custom-payload-to-snow
 
     if: >-
-      github.event.review.state == 'approved' &&
-      github.event.pull_request.base.ref == 'main'
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.review.state == 'approved' &&
+        github.event.pull_request.base.ref == 'main'
+      )
 
     runs-on: [self-hosted, linux, x64, snow-github]
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-
-      - name: Detect CA bundle path
+      - name: Validate runner tools
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
-            CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
-          elif [ -f /etc/pki/tls/certs/ca-bundle.crt ]; then
-            CA_BUNDLE="/etc/pki/tls/certs/ca-bundle.crt"
-          else
-            echo "No known CA bundle found."
-            exit 1
-          fi
-
-          echo "Using CA bundle: ${CA_BUNDLE}"
-
-          echo "SSL_CERT_FILE=${CA_BUNDLE}" >> "$GITHUB_ENV"
-          echo "REQUESTS_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
-          echo "CURL_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
-          echo "GIT_SSL_CAINFO=${CA_BUNDLE}" >> "$GITHUB_ENV"
-          echo "NODE_EXTRA_CA_CERTS=${CA_BUNDLE}" >> "$GITHUB_ENV"
-
-      - name: Validate required tools
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          for cmd in curl gh python3; do
-            if ! command -v "${cmd}" >/dev/null 2>&1; then
-              echo "Missing required command on self-hosted runner: ${cmd}"
+          for command in curl gh python3; do
+            if ! command -v "${command}" >/dev/null 2>&1; then
+              echo "Missing required runner tool: ${command}"
               exit 1
             fi
           done
 
-          curl --version
-          gh --version
-          python3 --version
-
-      - name: Create temporary static pass statuses
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-
-          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-
-          CONTEXTS=(
-            "checkov"
-            "codeql"
-            "gitleaks"
-            "terraform-checks (dev)"
-            "terraform-checks (prod)"
-          )
-
-          for CONTEXT in "${CONTEXTS[@]}"; do
-            echo "Setting temporary static pass status for: ${CONTEXT}"
-
-            gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
-              -f state="success" \
-              -f context="${CONTEXT}" \
-              -f description="Temporary static pass for SNOW team E2E test" \
-              -f target_url="${RUN_URL}"
-          done
-
-          echo "Temporary static pass statuses created."
-
-      - name: Fetch PR metadata and SME approval details
+      - name: Read PR details and completed checks
         id: pr_data
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+          TRIGGER_MODE: ${{ github.event_name }}
+          EVENT_REVIEWER: ${{ github.event.review.user.login }}
+          EVENT_REVIEW_BODY: ${{ github.event.review.body }}
         run: |
           set -euo pipefail
 
-          gh api \
-            -H "Accept: application/vnd.github+json" \
-            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > pr.json
+          if [ -z "${PR_NUMBER:-}" ]; then
+            echo "PR number was not provided."
+            exit 1
+          fi
 
           gh api \
             -H "Accept: application/vnd.github+json" \
-            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100" > reviews.json
+            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+            > pr.json
 
-          python3 <<'PY' > pr-outputs.txt
+          BASE_BRANCH="$(python3 - <<'PY'
           import json
           from pathlib import Path
 
           pr = json.loads(Path("pr.json").read_text())
+          print(pr.get("base", {}).get("ref", ""))
+          PY
+          )"
+
+          if [ "${BASE_BRANCH}" != "main" ]; then
+            echo "This workflow only sends PRs targeting main."
+            echo "Current target branch: ${BASE_BRANCH}"
+            exit 1
+          fi
+
+          HEAD_SHA="$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          pr = json.loads(Path("pr.json").read_text())
+          print(pr.get("head", {}).get("sha", ""))
+          PY
+          )"
+
+          if [ -z "${HEAD_SHA}" ]; then
+            echo "Could not determine PR head commit SHA."
+            exit 1
+          fi
+
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?per_page=100" \
+            > checks.json
+
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100" \
+            > reviews.json
+
+          python3 <<'PY' > outputs.txt
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          pr = json.loads(Path("pr.json").read_text())
+          checks_payload = json.loads(Path("checks.json").read_text())
           reviews = json.loads(Path("reviews.json").read_text())
 
-          latest_by_user = {}
+          trigger_mode = os.environ.get("TRIGGER_MODE", "")
+          event_reviewer = os.environ.get("EVENT_REVIEWER", "")
+          event_review_body = os.environ.get("EVENT_REVIEW_BODY", "")
+
+          check_runs = checks_payload.get("check_runs", [])
+
+          def normalize(value):
+              return (value or "").strip().lower()
+
+          def check_result(run):
+              status = normalize(run.get("status"))
+              conclusion = normalize(run.get("conclusion"))
+
+              if conclusion == "success":
+                  return "PASSED"
+
+              if conclusion in (
+                  "failure",
+                  "cancelled",
+                  "timed_out",
+                  "action_required",
+                  "startup_failure",
+              ):
+                  return "FAILED"
+
+              if conclusion in ("skipped", "neutral"):
+                  return "SKIPPED"
+
+              if status in ("queued", "in_progress", "waiting", "requested", "pending"):
+                  return "PENDING"
+
+              return "MISSING"
+
+          def get_check_result(matchers):
+              matches = []
+
+              for run in check_runs:
+                  name = normalize(run.get("name"))
+                  for matcher in matchers:
+                      matcher = normalize(matcher)
+
+                      if matcher == name or matcher in name:
+                          matches.append(run)
+                          break
+
+              if not matches:
+                  return "MISSING"
+
+              results = [check_result(run) for run in matches]
+
+              if "FAILED" in results:
+                  return "FAILED"
+
+              if "PENDING" in results or "MISSING" in results:
+                  return "PENDING"
+
+              if all(result in ("PASSED", "SKIPPED") for result in results):
+                  return "PASSED"
+
+              return "PENDING"
+
+          checkov = get_check_result(["checkov"])
+          codeql = get_check_result(["codeql"])
+          gitleaks = get_check_result(["gitleaks"])
+          terraform_dev = get_check_result(["terraform-checks (dev)"])
+          terraform_prod = get_check_result(["terraform-checks (prod)"])
+
+          required_checks = [
+              checkov,
+              codeql,
+              gitleaks,
+              terraform_dev,
+              terraform_prod,
+          ]
+
+          if any(item == "FAILED" for item in required_checks):
+              overall_status = "failure"
+          elif all(item in ("PASSED", "SKIPPED") for item in required_checks):
+              overall_status = "success"
+          else:
+              overall_status = "pending"
+
+          if overall_status != "success":
+              print("Required checks are not all successful.", file=sys.stderr)
+              print(f"Checkov: {checkov}", file=sys.stderr)
+              print(f"CodeQL: {codeql}", file=sys.stderr)
+              print(f"Gitleaks: {gitleaks}", file=sys.stderr)
+              print(f"Terraform dev: {terraform_dev}", file=sys.stderr)
+              print(f"Terraform prod: {terraform_prod}", file=sys.stderr)
+              sys.exit(1)
+
+          latest_review_by_user = {}
 
           for review in reviews:
               user = (review.get("user") or {}).get("login", "")
+
               if user:
-                  latest_by_user[user] = review
+                  latest_review_by_user[user] = review
 
-          approved_users = [
-              user
-              for user, review in latest_by_user.items()
-              if str(review.get("state", "")).upper() == "APPROVED"
-          ]
+          approved_users = []
 
-          latest_approved_review = None
-
-          for review in reversed(reviews):
+          for user, review in latest_review_by_user.items():
               if str(review.get("state", "")).upper() == "APPROVED":
-                  latest_approved_review = review
-                  break
+                  approved_users.append(user)
 
-          latest_approver = ""
-          approval_notes = ""
+          approver = event_reviewer
+          approval_notes = event_review_body.strip()
 
-          if latest_approved_review:
-              latest_approver = (latest_approved_review.get("user") or {}).get("login", "")
-              approval_notes = latest_approved_review.get("body") or ""
+          if trigger_mode == "workflow_dispatch":
+              approver = ""
+              approval_notes = (
+                  "Manual custom-payload test started from GitHub Actions. "
+                  "This is a ServiceNow integration test only."
+              )
 
-          if not approval_notes and latest_approver:
-              approval_notes = f"PR approved in GitHub by {latest_approver}."
+          if not approval_notes and approver:
+              approval_notes = f"PR approved in GitHub by {approver}."
+
+          details = {
+              "checkov": checkov,
+              "codeql": codeql,
+              "gitleaks": gitleaks,
+              "terraform_checks_dev": terraform_dev,
+              "terraform_checks_prod": terraform_prod,
+              "check_runs": [
+                  {
+                      "name": run.get("name", ""),
+                      "status": run.get("status", ""),
+                      "conclusion": run.get("conclusion", ""),
+                      "html_url": run.get("html_url", ""),
+                  }
+                  for run in check_runs
+              ],
+          }
 
           outputs = {
               "pr_number": str(pr.get("number", "")),
@@ -156,14 +260,19 @@ jobs:
               "base_sha": pr.get("base", {}).get("sha", ""),
               "pr_author": pr.get("user", {}).get("login", ""),
               "pr_state": pr.get("state", ""),
-              "requested_by": pr.get("user", {}).get("login", ""),
+              "requester": pr.get("user", {}).get("login", ""),
               "mergeable": "" if pr.get("mergeable") is None else str(pr.get("mergeable")).lower(),
               "mergeable_state": pr.get("mergeable_state", ""),
-              "closed_at": pr.get("closed_at") or "",
-              "merged_at": pr.get("merged_at") or "",
-              "latest_approver": latest_approver,
+              "approver": approver,
               "approved_users_json": json.dumps(approved_users),
               "approval_notes": approval_notes,
+              "github_checks_status": overall_status,
+              "checkov_result": checkov,
+              "codeql_result": codeql,
+              "gitleaks_result": gitleaks,
+              "terraform_dev_result": terraform_dev,
+              "terraform_prod_result": terraform_prod,
+              "github_checks_detail": json.dumps(details, separators=(",", ":")),
           }
 
           for key, value in outputs.items():
@@ -172,46 +281,13 @@ jobs:
               print("EOF")
           PY
 
-          cat pr-outputs.txt >> "$GITHUB_OUTPUT"
+          cat outputs.txt >> "$GITHUB_OUTPUT"
 
-      - name: Send enriched approval payload to ServiceNow
-        shell: bash
-        env:
-          SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
-          SN_API_PATH: ${{ secrets.SN_API_PATH }}
-          SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
-        run: |
-          set -euo pipefail
-
-          for item in SN_INSTANCE_URL SN_API_PATH SN_GITHUB_SHARED_SECRET; do
-            if [ -z "${!item:-}" ]; then
-              echo "Missing required GitHub secret: ${item}"
-              exit 1
-            fi
-          done
-
-          URL="${SN_INSTANCE_URL}${SN_API_PATH}"
-
-          echo "Sending enriched approval payload to ServiceNow:"
-          echo "${URL}"
-
-          curl --fail-with-body -sS \
-            --connect-timeout 20 \
-            --max-time 120 \
-            --retry 3 \
-            --retry-delay 5 \
-            --request POST \
-            --url "${URL}" \
-            --header "Content-Type: application/json" \
-            --header "Accept: application/json" \
-            --header "X-GitHub-SNOW-Shared-Secret: ${SN_GITHUB_SHARED_SECRET}" \
-            --data @snow-payload.json
-
-      - name: Build static pass ServiceNow payload
+      - name: Build custom ServiceNow payload
         shell: bash
         env:
           SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
-          CMDB_CI_NAME: ${{ secrets.CMDB_CI_NAME }}
+          CMDB_CI_NAME: ${{ vars.CMDB_CI_NAME }}
 
           PR_NUMBER: ${{ steps.pr_data.outputs.pr_number }}
           PR_LINK: ${{ steps.pr_data.outputs.pr_link }}
@@ -222,18 +298,28 @@ jobs:
           BASE_SHA: ${{ steps.pr_data.outputs.base_sha }}
           PR_AUTHOR: ${{ steps.pr_data.outputs.pr_author }}
           PR_STATE: ${{ steps.pr_data.outputs.pr_state }}
-          REQUESTED_BY: ${{ steps.pr_data.outputs.requested_by }}
+          REQUESTER: ${{ steps.pr_data.outputs.requester }}
           MERGEABLE: ${{ steps.pr_data.outputs.mergeable }}
           MERGEABLE_STATE: ${{ steps.pr_data.outputs.mergeable_state }}
-          CLOSED_AT: ${{ steps.pr_data.outputs.closed_at }}
-          MERGED_AT: ${{ steps.pr_data.outputs.merged_at }}
-          LATEST_APPROVER: ${{ steps.pr_data.outputs.latest_approver }}
+          APPROVER: ${{ steps.pr_data.outputs.approver }}
           APPROVED_USERS_JSON: ${{ steps.pr_data.outputs.approved_users_json }}
           APPROVAL_NOTES: ${{ steps.pr_data.outputs.approval_notes }}
+          GITHUB_CHECKS_STATUS: ${{ steps.pr_data.outputs.github_checks_status }}
+          GITHUB_CHECKS_DETAIL: ${{ steps.pr_data.outputs.github_checks_detail }}
+          CHECKOV_RESULT: ${{ steps.pr_data.outputs.checkov_result }}
+          CODEQL_RESULT: ${{ steps.pr_data.outputs.codeql_result }}
+          GITLEAKS_RESULT: ${{ steps.pr_data.outputs.gitleaks_result }}
+          TERRAFORM_DEV_RESULT: ${{ steps.pr_data.outputs.terraform_dev_result }}
+          TERRAFORM_PROD_RESULT: ${{ steps.pr_data.outputs.terraform_prod_result }}
         run: |
           set -euo pipefail
 
-          python3 <<'PY' > snow-static-pass-payload.json
+          if [ -z "${SN_GITHUB_SHARED_SECRET:-}" ]; then
+            echo "Missing GitHub secret: SN_GITHUB_SHARED_SECRET"
+            exit 1
+          fi
+
+          python3 <<'PY' > snow-custom-payload.json
           import datetime
           import json
           import os
@@ -241,7 +327,10 @@ jobs:
           g = os.environ.get
 
           now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-          end = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+          end = (
+              datetime.datetime.now(datetime.timezone.utc)
+              + datetime.timedelta(hours=1)
+          ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
           repo_full = g("GITHUB_REPOSITORY", "")
           owner = repo_full.split("/")[0] if "/" in repo_full else ""
@@ -249,8 +338,6 @@ jobs:
 
           server = g("GITHUB_SERVER_URL", "https://github.com")
           run_id = g("GITHUB_RUN_ID", "")
-          run_attempt = g("GITHUB_RUN_ATTEMPT", "")
-          workflow_name = g("GITHUB_WORKFLOW", "")
           run_url = f"{server}/{repo_full}/actions/runs/{run_id}"
 
           try:
@@ -258,32 +345,18 @@ jobs:
           except Exception:
               approvers = []
 
-          latest_approver = g("LATEST_APPROVER", "")
+          approver = g("APPROVER", "")
 
-          if latest_approver and latest_approver not in approvers:
-              approvers.append(latest_approver)
+          if approver and approver not in approvers:
+              approvers.append(approver)
 
-          approval_notes = g("APPROVAL_NOTES", "").strip()
-
-          if not approval_notes and latest_approver:
-              approval_notes = f"PR approved in GitHub by {latest_approver}."
-          elif not approval_notes:
-              approval_notes = "PR approved in GitHub. Static-pass SNOW test payload sent for SNOW team workflow testing."
-
-          checks_detail = {
-              "mode": "temporary_static_pass_for_snow_team_testing",
-              "message": "Checks were not executed in this workflow. Results are intentionally marked PASSED to allow SNOW team end-to-end testing.",
-              "checkov": "PASSED",
-              "codeql": "PASSED",
-              "gitleaks": "PASSED",
-              "terraform_checks_dev": "PASSED",
-              "terraform_checks_prod": "PASSED"
-          }
+          cmdb_ci_name = g("CMDB_CI_NAME", "") or "ccoe-snow-webhook-demo-s3"
 
           payload = {
               "shared_secret": g("SN_GITHUB_SHARED_SECRET", ""),
               "event_type": "pull_request_ready_for_snow_approval",
-              "payload_mode": "temporary_static_pass",
+              "payload_mode": "simple_custom_payload_test",
+
               "owner": owner,
               "repo": repo,
               "repo_name": repo_full,
@@ -299,115 +372,146 @@ jobs:
 
               "pr_author": g("PR_AUTHOR", ""),
               "pr_state": g("PR_STATE", ""),
-              "requested_by": g("REQUESTED_BY", ""),
-              "requester": g("REQUESTED_BY", ""),
-              "requestor_github_username": g("REQUESTED_BY", ""),
+              "requested_by": g("REQUESTER", ""),
+              "requester": g("REQUESTER", ""),
+              "requestor_github_username": g("REQUESTER", ""),
               "requestor_email": "FROM_PR_COMMENT_OR_OKTA_MAPPING",
 
               "mergeable": g("MERGEABLE", ""),
               "mergeable_state": g("MERGEABLE_STATE", ""),
-              "closed_at": g("CLOSED_AT", ""),
-              "merged_at": g("MERGED_AT", ""),
 
               "approvers": approvers,
-              "sme_approval_1": latest_approver,
-              "approval_notes": approval_notes,
+              "sme_approval_1": approver,
+              "approval_notes": g("APPROVAL_NOTES", ""),
 
               "status": "waiting_for_snow",
               "approval_state": "requested",
               "status_context": "snow-approval",
-              "deployment_gate_context": "snow-deployment-gate",
 
-              "github_check_status": "success",
-              "github_checks_status": "success",
-              "github_checks_detail": json.dumps(checks_detail, separators=(",", ":")),
+              "github_check_status": g("GITHUB_CHECKS_STATUS", ""),
+              "github_checks_status": g("GITHUB_CHECKS_STATUS", ""),
+              "github_checks_detail": g("GITHUB_CHECKS_DETAIL", ""),
 
               "terraform_validate": "PASSED",
-              "checkov_scan_result": "PASSED",
-              "codeql_scan_result": "PASSED",
-              "gitleaks_scan_result": "PASSED",
+              "checkov_scan_result": g("CHECKOV_RESULT", ""),
+              "codeql_scan_result": g("CODEQL_RESULT", ""),
+              "gitleaks_scan_result": g("GITLEAKS_RESULT", ""),
               "security_scan_result": "PASSED",
+              "terraform_plan_summary": "Not collected in this simple custom-payload integration test.",
 
               "pipeline_run_id": run_id,
-              "pipeline_run_attempt": run_attempt,
               "pipeline_url": run_url,
               "artifact_url": run_url,
-              "workflow_name": workflow_name,
-              "runner_type": "self-hosted",
-              "runner_label": "snow-github",
-
-              "github_callback_attempts": 0,
-              "deployment_callback_expected": True,
-              "deployment_callback_event_type": "deployment_result",
-              "deployment_callback_source": "terraform-deploy-after-merge",
 
               "environment": "production",
-              "cmdb_ci_name": g("CMDB_CI_NAME", ""),
+              "cmdb_ci_name": cmdb_ci_name,
 
               "priority": "medium",
               "risk": "medium",
               "impact": "medium",
-              "justification": "Temporary static-pass end-to-end test for ServiceNow team. Real security and Terraform checks are intentionally bypassed only for this test workflow.",
-              "implementation_plan": "After ServiceNow approval and PR merge, the existing Terraform deployment workflow deploys to AWS and sends the deployment callback to ServiceNow.",
-              "impact_summary": "Production-bound Terraform change submitted for ServiceNow approval using temporary static-pass metadata.",
-              "rollback_plan": "If rejected, do not merge. If deployed and rollback is required, revert the PR or apply the previous known-good Terraform version.",
+              "justification": "Custom GitHub-to-ServiceNow payload integration test using completed GitHub checks.",
+              "implementation_plan": "ServiceNow receives the custom payload and processes the PR approval record.",
+              "impact_summary": "GitHub PR submitted to ServiceNow using a custom payload.",
+              "rollback_plan": "Do not merge the PR if ServiceNow rejects the request.",
+
+              "deployment_callback_expected": False,
+              "github_callback_attempts": 0,
 
               "planned_start_date": now,
               "planned_end_date": end,
-              "triggered_at": now
+              "triggered_at": now,
           }
 
           print(json.dumps(payload, indent=2))
           PY
 
-          echo "ServiceNow static-pass payload:"
-          cat snow-static-pass-payload.json
+          echo "Custom payload file created."
 
-      - name: Send static pass payload to ServiceNow
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("snow-custom-payload.json").read_text())
+
+          summary = {
+              "pr_number": payload.get("pr_number"),
+              "repo_name": payload.get("repo_name"),
+              "event_type": payload.get("event_type"),
+              "payload_mode": payload.get("payload_mode"),
+              "github_checks_status": payload.get("github_checks_status"),
+              "environment": payload.get("environment"),
+              "status_context": payload.get("status_context"),
+          }
+
+          print(json.dumps(summary, indent=2))
+          PY
+
+      - name: Send custom payload to ServiceNow
         shell: bash
         env:
-          SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
-          SN_API_PATH: ${{ secrets.SN_API_PATH }}
-          BEARER: ${{ steps.token.outputs.token }}
+          SN_APPROVAL_POST_URL: ${{ secrets.SN_APPROVAL_POST_URL }}
           SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
         run: |
           set -euo pipefail
 
-          for item in SN_INSTANCE_URL SN_API_PATH BEARER SN_GITHUB_SHARED_SECRET; do
-            if [ -z "${!item:-}" ]; then
-              echo "Missing required value: ${item}"
-              exit 1
-            fi
-          done
+          if [ -z "${SN_APPROVAL_POST_URL:-}" ]; then
+            echo "Missing GitHub secret: SN_APPROVAL_POST_URL"
+            exit 1
+          fi
 
-          URL="${SN_INSTANCE_URL}${SN_API_PATH}"
+          if [ -z "${SN_GITHUB_SHARED_SECRET:-}" ]; then
+            echo "Missing GitHub secret: SN_GITHUB_SHARED_SECRET"
+            exit 1
+          fi
 
-          echo "Sending static-pass payload to ServiceNow endpoint: ${URL}"
+          if [ ! -f snow-custom-payload.json ]; then
+            echo "snow-custom-payload.json was not created."
+            echo "Current files:"
+            ls -la
+            exit 1
+          fi
 
-          curl --fail-with-body -sS \
-            --request POST \
-            --url "${URL}" \
-            --header "Authorization: Bearer ${BEARER}" \
-            --header "Content-Type: application/json" \
-            --header "Accept: application/json" \
-            --header "X-GitHub-SNOW-Shared-Secret: ${SN_GITHUB_SHARED_SECRET}" \
-            --data @snow-static-pass-payload.json
+          RESPONSE_FILE="$(mktemp)"
 
-          echo "Static-pass ServiceNow payload sent successfully."
+          trap 'rm -f "${RESPONSE_FILE}" snow-custom-payload.json pr.json checks.json reviews.json outputs.txt' EXIT
 
-      - name: Write workflow summary
+          HTTP_STATUS="$(
+            curl \
+              --silent \
+              --show-error \
+              --connect-timeout 20 \
+              --max-time 120 \
+              --output "${RESPONSE_FILE}" \
+              --write-out "%{http_code}" \
+              --request POST \
+              --url "${SN_APPROVAL_POST_URL}" \
+              --header "Content-Type: application/json" \
+              --header "Accept: application/json" \
+              --header "X-GitHub-SNOW-Shared-Secret: ${SN_GITHUB_SHARED_SECRET}" \
+              --data-binary @snow-custom-payload.json
+          )"
+
+          echo "ServiceNow HTTP status: ${HTTP_STATUS}"
+
+          if [[ ! "${HTTP_STATUS}" =~ ^2 ]]; then
+            echo "ServiceNow did not accept the payload."
+            echo "Response body:"
+            head -c 1500 "${RESPONSE_FILE}" || true
+            exit 1
+          fi
+
+          echo "ServiceNow accepted the custom payload."
+
+      - name: Write summary
         if: always()
         shell: bash
         run: |
           {
-            echo "## SNOW Static-Pass Test Workflow"
+            echo "## Simple Custom ServiceNow Payload Test"
             echo ""
-            echo "- Purpose: Temporary SNOW team end-to-end testing"
-            echo "- PR: #${{ github.event.pull_request.number }}"
-            echo "- Source branch: ${{ github.event.pull_request.head.ref }}"
-            echo "- Target branch: ${{ github.event.pull_request.base.ref }}"
+            echo "- PR: #${{ steps.pr_data.outputs.pr_number }}"
+            echo "- GitHub checks: ${{ steps.pr_data.outputs.github_checks_status }}"
             echo "- Runner: self-hosted / snow-github"
-            echo "- Static check results sent to SNOW: PASSED"
-            echo "- Static GitHub statuses created: checkov, codeql, gitleaks, terraform-checks dev/prod"
-            echo "- SNOW approval context still controlled by ServiceNow: snow-approval"
+            echo "- OAuth: intentionally not used in this test"
+            echo "- Deployment callback: intentionally disabled in this test"
           } >> "$GITHUB_STEP_SUMMARY"
