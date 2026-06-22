@@ -294,6 +294,9 @@ jobs:
 
           echo "Requesting ServiceNow OAuth token from host: ${OAUTH_HOST}"
 
+          TOKEN_FILE="$(mktemp)"
+          trap 'rm -f "${TOKEN_FILE}"' EXIT
+
           CURL_ARGS=(
             --silent
             --show-error
@@ -333,9 +336,6 @@ jobs:
               --data-urlencode "password=${SN_OAUTH_PASSWORD}"
             )
           fi
-
-          TOKEN_FILE="$(mktemp)"
-          trap 'rm -f "${TOKEN_FILE}"' EXIT
 
           set +e
 
