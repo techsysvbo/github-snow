@@ -25,6 +25,7 @@ Master
 Cluade for CHRIST
 GPT for CHRIST
 GPT for CHRIST
+chatgpt for MY LORD JESUS CHRIST
 
 
 GitHub Secrets
