@@ -1,23 +1,22 @@
-name: Send Approved PR to ServiceNow
+name: send-approved-pr-to-snow
 
 on:
   pull_request_review:
-    types: [submitted]
+    types:
+      - submitted
 
 permissions:
   contents: read
   pull-requests: read
+  statuses: read
   checks: read
 
 jobs:
   send-to-snow:
-    name: Send approved PR to ServiceNow
-
-    # Run only when a PR targeting main receives an approval.
+    name: send-to-snow
     if: >-
       github.event.review.state == 'approved' &&
       github.event.pull_request.base.ref == 'main'
-
     runs-on: [self-hosted, linux, x64, snow-github]
 
     steps:
@@ -36,7 +35,7 @@ jobs:
           elif [ -f /etc/pki/tls/certs/ca-bundle.crt ]; then
             CA_BUNDLE="/etc/pki/tls/certs/ca-bundle.crt"
           else
-            echo "No trusted CA bundle found on the runner."
+            echo "No known CA bundle found on the runner."
             exit 1
           fi
 
@@ -66,21 +65,20 @@ jobs:
             "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?per_page=100" \
             > check-runs.json
 
-          python3 <<'PY'
+          python3 <<'PY' > github-outputs.txt
           import json
-          import sys
           from pathlib import Path
 
           pr = json.loads(Path("pr.json").read_text())
-          check_payload = json.loads(Path("check-runs.json").read_text())
-          check_runs = check_payload.get("check_runs", [])
+          checks_payload = json.loads(Path("check-runs.json").read_text())
+          check_runs = checks_payload.get("check_runs", [])
 
-          def normalize(value):
+          def norm(value):
               return (value or "").strip().lower()
 
-          def result_from_run(run):
-              status = normalize(run.get("status"))
-              conclusion = normalize(run.get("conclusion"))
+          def to_result(conclusion, status):
+              conclusion = norm(conclusion)
+              status = norm(status)
 
               if conclusion == "success":
                   return "PASSED"
@@ -108,86 +106,117 @@ jobs:
 
               return "MISSING"
 
-          def latest_result(required_name):
-              matches = [
-                  run
-                  for run in check_runs
-                  if normalize(run.get("name")) == normalize(required_name)
-              ]
+          def matches_for(matchers):
+              matches = []
+
+              for run in check_runs:
+                  name = norm(run.get("name"))
+
+                  for matcher in matchers:
+                      matcher = norm(matcher)
+
+                      if matcher == name or matcher in name:
+                          matches.append(
+                              {
+                                  "name": run.get("name", ""),
+                                  "status": run.get("status", ""),
+                                  "conclusion": run.get("conclusion", ""),
+                                  "result": to_result(
+                                      run.get("conclusion"),
+                                      run.get("status"),
+                                  ),
+                                  "html_url": run.get("html_url", ""),
+                              }
+                          )
+                          break
+
+              return matches
+
+          def single_result(matchers):
+              matches = matches_for(matchers)
 
               if not matches:
-                  return {
-                      "name": required_name,
-                      "result": "MISSING",
-                      "status": "",
-                      "conclusion": "",
-                      "html_url": "",
-                  }
+                  return "MISSING"
 
-              matches.sort(
-                  key=lambda run: (
-                      run.get("completed_at")
-                      or run.get("started_at")
-                      or run.get("created_at")
-                      or ""
-                  )
-              )
+              if any(item["result"] == "FAILED" for item in matches):
+                  return "FAILED"
 
-              latest = matches[-1]
+              if any(
+                  item["result"] in ("PENDING", "MISSING")
+                  for item in matches
+              ):
+                  return "PENDING"
 
-              return {
-                  "name": latest.get("name", required_name),
-                  "result": result_from_run(latest),
-                  "status": latest.get("status", ""),
-                  "conclusion": latest.get("conclusion", ""),
-                  "html_url": latest.get("html_url", ""),
-              }
+              if all(
+                  item["result"] in ("PASSED", "SKIPPED")
+                  for item in matches
+              ):
+                  return "PASSED"
 
-          checks = {
-              "checkov": latest_result("checkov"),
-              "codeql": latest_result("codeql"),
-              "gitleaks": latest_result("gitleaks"),
-              "terraform_checks_dev": latest_result("terraform-checks (dev)"),
-              "terraform_checks_prod": latest_result("terraform-checks (prod)"),
-          }
+              return "PENDING"
+
+          checkov = single_result(["checkov"])
+          codeql = single_result(["codeql"])
+          gitleaks = single_result(["gitleaks"])
+          terraform_dev = single_result(["terraform-checks (dev)"])
+          terraform_prod = single_result(["terraform-checks (prod)"])
 
           required_results = [
-              checks["checkov"]["result"],
-              checks["codeql"]["result"],
-              checks["gitleaks"]["result"],
-              checks["terraform_checks_dev"]["result"],
-              checks["terraform_checks_prod"]["result"],
+              checkov,
+              codeql,
+              gitleaks,
+              terraform_dev,
+              terraform_prod,
           ]
 
-          if all(result in ("PASSED", "SKIPPED") for result in required_results):
-              overall_status = "success"
-          elif any(result == "FAILED" for result in required_results):
-              overall_status = "failure"
+          if all(item in ("PASSED", "SKIPPED") for item in required_results):
+              github_checks_status = "success"
+          elif any(item == "FAILED" for item in required_results):
+              github_checks_status = "failure"
           else:
-              overall_status = "pending"
+              github_checks_status = "pending"
 
-          print(f"Checkov: {checks['checkov']['result']}")
-          print(f"CodeQL: {checks['codeql']['result']}")
-          print(f"Gitleaks: {checks['gitleaks']['result']}")
-          print(f"Terraform dev: {checks['terraform_checks_dev']['result']}")
-          print(f"Terraform prod: {checks['terraform_checks_prod']['result']}")
+          details = {
+              "checkov": checkov,
+              "codeql": codeql,
+              "gitleaks": gitleaks,
+              "terraform_checks_dev": terraform_dev,
+              "terraform_checks_prod": terraform_prod,
+              "check_runs": [
+                  {
+                      "name": run.get("name", ""),
+                      "status": run.get("status", ""),
+                      "conclusion": run.get("conclusion", ""),
+                      "html_url": run.get("html_url", ""),
+                  }
+                  for run in check_runs
+              ],
+          }
 
-          if overall_status != "success":
-              print(
-                  "Technical checks are not all successful. "
-                  "ServiceNow payload will not be sent.",
-                  file=sys.stderr,
-              )
-              sys.exit(1)
-
-          context = {
-              "pr_number": pr.get("number", 0),
-              "pr_link": pr.get("html_url", ""),
-              "pr_title": pr.get("title", ""),
-              "source_branch": pr.get("head", {}).get("ref", ""),
-              "target_branch": pr.get("base", {}).get("ref", ""),
-              "head_sha": pr.get("head", {}).get("sha", ""),
-              "base_sha": pr.get("base", {}).get("sha", ""),
+          outputs = {
+              "github_checks_status": github_checks_status,
+              "checkov_scan_result": checkov,
+              "codeql_scan_result": codeql,
+              "gitleaks_scan_result": gitleaks,
+              "terraform_dev_result": terraform_dev,
+              "terraform_prod_result": terraform_prod,
+              "terraform_validate": (
+                  "PASSED"
+                  if terraform_dev in ("PASSED", "SKIPPED")
+                  and terraform_prod in ("PASSED", "SKIPPED")
+                  else "FAILED"
+              ),
+              "security_scan_result": (
+                  "PASSED"
+                  if checkov in ("PASSED", "SKIPPED")
+                  and codeql in ("PASSED", "SKIPPED")
+                  and gitleaks in ("PASSED", "SKIPPED")
+                  else "FAILED"
+              ),
+              "github_checks_detail": json.dumps(
+                  details,
+                  separators=(",", ":"),
+              ),
               "pr_author": pr.get("user", {}).get("login", ""),
               "pr_state": pr.get("state", ""),
               "requested_by": pr.get("user", {}).get("login", ""),
@@ -199,21 +228,45 @@ jobs:
               "mergeable_state": pr.get("mergeable_state", ""),
               "closed_at": pr.get("closed_at") or "",
               "merged_at": pr.get("merged_at") or "",
-              "github_checks_status": overall_status,
-              "checkov_scan_result": checks["checkov"]["result"],
-              "codeql_scan_result": checks["codeql"]["result"],
-              "gitleaks_scan_result": checks["gitleaks"]["result"],
-              "terraform_dev_result": checks["terraform_checks_dev"]["result"],
-              "terraform_prod_result": checks["terraform_checks_prod"]["result"],
-              "terraform_validate": "PASSED",
-              "security_scan_result": "PASSED",
-              "github_checks_detail": checks,
+              "pr_url": pr.get("html_url", ""),
+              "pr_title": pr.get("title", ""),
+              "source_branch": pr.get("head", {}).get("ref", ""),
+              "target_branch": pr.get("base", {}).get("ref", ""),
+              "head_sha": pr.get("head", {}).get("sha", ""),
           }
 
-          Path("snow-context.json").write_text(
-              json.dumps(context, indent=2)
-          )
+          for key, value in outputs.items():
+              print(f"{key}<<EOF")
+              print("" if value is None else str(value))
+              print("EOF")
           PY
+
+          cat github-outputs.txt >> "$GITHUB_OUTPUT"
+
+      - name: Stop if GitHub checks are not successful
+        shell: bash
+        env:
+          GITHUB_CHECKS_STATUS: ${{ steps.github_data.outputs.github_checks_status }}
+          CHECKOV_RESULT: ${{ steps.github_data.outputs.checkov_scan_result }}
+          CODEQL_RESULT: ${{ steps.github_data.outputs.codeql_scan_result }}
+          GITLEAKS_RESULT: ${{ steps.github_data.outputs.gitleaks_scan_result }}
+          TERRAFORM_DEV_RESULT: ${{ steps.github_data.outputs.terraform_dev_result }}
+          TERRAFORM_PROD_RESULT: ${{ steps.github_data.outputs.terraform_prod_result }}
+        run: |
+          set -euo pipefail
+
+          echo "GitHub checks status: ${GITHUB_CHECKS_STATUS}"
+          echo "Checkov: ${CHECKOV_RESULT}"
+          echo "CodeQL: ${CODEQL_RESULT}"
+          echo "Gitleaks: ${GITLEAKS_RESULT}"
+          echo "Terraform dev: ${TERRAFORM_DEV_RESULT}"
+          echo "Terraform prod: ${TERRAFORM_PROD_RESULT}"
+
+          if [ "${GITHUB_CHECKS_STATUS}" != "success" ]; then
+            echo "GitHub checks are not all successful."
+            echo "The approval payload will not be sent to ServiceNow."
+            exit 1
+          fi
 
       - name: Get ServiceNow OAuth token
         id: token
@@ -222,24 +275,23 @@ jobs:
           SN_OAUTH_TOKEN_URL: ${{ secrets.SN_OAUTH_TOKEN_URL }}
           SN_OAUTH_CLIENT_ID: ${{ secrets.SN_OAUTH_CLIENT_ID }}
           SN_OAUTH_CLIENT_SECRET: ${{ secrets.SN_OAUTH_CLIENT_SECRET }}
+          SN_OAUTH_USERNAME: ${{ secrets.SN_OAUTH_USERNAME }}
+          SN_OAUTH_PASSWORD: ${{ secrets.SN_OAUTH_PASSWORD }}
         run: |
           set -euo pipefail
 
           for item in \
             SN_OAUTH_TOKEN_URL \
             SN_OAUTH_CLIENT_ID \
-            SN_OAUTH_CLIENT_SECRET
+            SN_OAUTH_CLIENT_SECRET \
+            SN_OAUTH_USERNAME \
+            SN_OAUTH_PASSWORD
           do
             if [ -z "${!item:-}" ]; then
-              echo "Missing GitHub secret: ${item}"
+              echo "Missing required GitHub secret: ${item}"
               exit 1
             fi
           done
-
-          if [[ "${SN_OAUTH_TOKEN_URL}" != https://* ]]; then
-            echo "SN_OAUTH_TOKEN_URL must use HTTPS."
-            exit 1
-          fi
 
           echo "Requesting ServiceNow OAuth token with client_credentials."
 
@@ -252,9 +304,6 @@ jobs:
             curl \
               --silent \
               --show-error \
-              --fail-with-body \
-              --proto '=https' \
-              --tlsv1.2 \
               --connect-timeout 20 \
               --max-time 90 \
               --output "${TOKEN_FILE}" \
@@ -265,7 +314,9 @@ jobs:
               --header "Accept: application/json" \
               --data-urlencode "grant_type=client_credentials" \
               --data-urlencode "client_id=${SN_OAUTH_CLIENT_ID}" \
-              --data-urlencode "client_secret=${SN_OAUTH_CLIENT_SECRET}"
+              --data-urlencode "client_secret=${SN_OAUTH_CLIENT_SECRET}" \
+              --data-urlencode "username=${SN_OAUTH_USERNAME}" \
+              --data-urlencode "password=${SN_OAUTH_PASSWORD}"
           )"
 
           CURL_EXIT=$?
@@ -274,80 +325,53 @@ jobs:
 
           echo "ServiceNow OAuth HTTP status: ${HTTP_STATUS:-no-response}"
 
-          if [ "${CURL_EXIT}" -ne 0 ] && [ "${CURL_EXIT}" -ne 22 ]; then
-            echo "OAuth connection failed before ServiceNow returned a usable response."
+          if [ "${CURL_EXIT}" -ne 0 ]; then
+            echo "OAuth connection failed before ServiceNow returned a response."
             echo "curl exit code: ${CURL_EXIT}"
             exit "${CURL_EXIT}"
           fi
 
           if [[ ! "${HTTP_STATUS}" =~ ^2[0-9][0-9]$ ]]; then
             echo "ServiceNow rejected the OAuth request."
-
-            python3 - "${TOKEN_FILE}" <<'PY'
-            import json
-            import sys
-            from pathlib import Path
-
-            raw = Path(sys.argv[1]).read_text(errors="replace")
-
-            try:
-                data = json.loads(raw)
-                message = (
-                    data.get("error_description")
-                    or data.get("error")
-                    or data.get("message")
-                    or "No error message returned."
-                )
-                print(f"OAuth error: {str(message)[:500]}")
-            except Exception:
-                print("ServiceNow returned a non-JSON OAuth error response.")
-            PY
-
+            echo "ServiceNow response:"
+            tr -d '\r' < "${TOKEN_FILE}" | head -c 1500 || true
+            echo
             exit 1
           fi
 
           ACCESS_TOKEN="$(
-            python3 - "${TOKEN_FILE}" <<'PY'
-            import json
-            import sys
-            from pathlib import Path
-
-            raw = Path(sys.argv[1]).read_text()
-
-            try:
-                response = json.loads(raw)
-            except Exception:
-                print(
-                    "ServiceNow OAuth response was not valid JSON.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-
-            token = response.get("access_token")
-
-            if not token:
-                print(
-                    "ServiceNow OAuth did not return access_token.",
-                    file=sys.stderr,
-                )
-                print(
-                    "Response keys: " + ", ".join(response.keys()),
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-
-            print(token)
-            PY
+            python3 -c 'import json, sys; data = json.load(open(sys.argv[1])); token = data.get("access_token"); sys.exit("ServiceNow OAuth did not return access_token. Response keys: " + ", ".join(data.keys())) if not token else None; print(token)' \
+              "${TOKEN_FILE}"
           )"
 
           echo "::add-mask::${ACCESS_TOKEN}"
           echo "token=${ACCESS_TOKEN}" >> "$GITHUB_OUTPUT"
 
-      - name: Build enriched ServiceNow approval payload
+      - name: Build enriched approval payload
         shell: bash
         env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           APPROVER: ${{ github.event.review.user.login }}
           REVIEW_BODY: ${{ github.event.review.body }}
+          PR_TITLE: ${{ steps.github_data.outputs.pr_title }}
+          PR_LINK: ${{ steps.github_data.outputs.pr_url }}
+          SOURCE_BRANCH: ${{ steps.github_data.outputs.source_branch }}
+          TARGET_BRANCH: ${{ steps.github_data.outputs.target_branch }}
+          HEAD_SHA: ${{ steps.github_data.outputs.head_sha }}
+          PR_AUTHOR: ${{ steps.github_data.outputs.pr_author }}
+          PR_STATE: ${{ steps.github_data.outputs.pr_state }}
+          REQUESTED_BY: ${{ steps.github_data.outputs.requested_by }}
+          MERGEABLE: ${{ steps.github_data.outputs.mergeable }}
+          MERGEABLE_STATE: ${{ steps.github_data.outputs.mergeable_state }}
+          CLOSED_AT: ${{ steps.github_data.outputs.closed_at }}
+          MERGED_AT: ${{ steps.github_data.outputs.merged_at }}
+          GITHUB_CHECKS_STATUS: ${{ steps.github_data.outputs.github_checks_status }}
+          GITHUB_CHECKS_DETAIL: ${{ steps.github_data.outputs.github_checks_detail }}
+          TERRAFORM_VALIDATE: ${{ steps.github_data.outputs.terraform_validate }}
+          CHECKOV_SCAN_RESULT: ${{ steps.github_data.outputs.checkov_scan_result }}
+          CODEQL_SCAN_RESULT: ${{ steps.github_data.outputs.codeql_scan_result }}
+          GITLEAKS_SCAN_RESULT: ${{ steps.github_data.outputs.gitleaks_scan_result }}
+          SECURITY_SCAN_RESULT: ${{ steps.github_data.outputs.security_scan_result }}
         run: |
           set -euo pipefail
 
@@ -355,9 +379,8 @@ jobs:
           import datetime
           import json
           import os
-          from pathlib import Path
 
-          context = json.loads(Path("snow-context.json").read_text())
+          g = os.environ.get
 
           now = datetime.datetime.now(
               datetime.timezone.utc
@@ -368,21 +391,16 @@ jobs:
               + datetime.timedelta(hours=1)
           ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-          repo_full = os.environ.get("GITHUB_REPOSITORY", "")
-
+          repo_full = g("GITHUB_REPOSITORY", "")
           owner = repo_full.split("/")[0] if "/" in repo_full else ""
           repo = repo_full.split("/")[1] if "/" in repo_full else repo_full
 
-          server = os.environ.get(
-              "GITHUB_SERVER_URL",
-              "https://github.com",
-          )
-
-          run_id = os.environ.get("GITHUB_RUN_ID", "")
+          server = g("GITHUB_SERVER_URL", "https://github.com")
+          run_id = g("GITHUB_RUN_ID", "")
           run_url = f"{server}/{repo_full}/actions/runs/{run_id}"
 
-          approver = os.environ.get("APPROVER", "").strip()
-          review_body = os.environ.get("REVIEW_BODY", "").strip()
+          approver = g("APPROVER", "").strip()
+          review_body = g("REVIEW_BODY", "").strip()
 
           if not review_body and approver:
               review_body = f"PR approved in GitHub by {approver}."
@@ -392,44 +410,38 @@ jobs:
               "owner": owner,
               "repo": repo,
               "repo_name": repo_full,
-              "pr_number": context["pr_number"],
-              "pr_link": context["pr_link"],
-              "pr_title": context["pr_title"],
-              "source_branch": context["source_branch"],
-              "target_branch": context["target_branch"],
-              "commit_sha": context["head_sha"],
-              "head_sha": context["head_sha"],
-              "base_sha": context["base_sha"],
-              "pr_author": context["pr_author"],
-              "pr_state": context["pr_state"],
-              "requested_by": context["requested_by"],
-              "requester": context["requested_by"],
-              "requestor_github_username": context["requested_by"],
+              "pr_number": int(g("PR_NUMBER", "0") or 0),
+              "pr_link": g("PR_LINK", ""),
+              "pr_title": g("PR_TITLE", ""),
+              "source_branch": g("SOURCE_BRANCH", ""),
+              "target_branch": g("TARGET_BRANCH", ""),
+              "commit_sha": g("HEAD_SHA", ""),
+              "pr_author": g("PR_AUTHOR", ""),
+              "pr_state": g("PR_STATE", ""),
+              "requested_by": g("REQUESTED_BY", ""),
+              "requester": g("REQUESTED_BY", ""),
+              "requestor_github_username": g("REQUESTED_BY", ""),
               "requestor_email": "FROM_PR_COMMENT_OR_OKTA_MAPPING",
-              "mergeable": context["mergeable"],
-              "mergeable_state": context["mergeable_state"],
-              "closed_at": context["closed_at"],
-              "merged_at": context["merged_at"],
+              "mergeable": g("MERGEABLE", ""),
+              "mergeable_state": g("MERGEABLE_STATE", ""),
+              "closed_at": g("CLOSED_AT", ""),
+              "merged_at": g("MERGED_AT", ""),
               "approvers": [approver] if approver else [],
               "sme_approval_1": approver,
               "approval_notes": review_body,
               "status": "waiting_for_snow",
               "approval_state": "requested",
               "status_context": "snow-approval",
-              "github_check_status": context["github_checks_status"],
-              "github_checks_status": context["github_checks_status"],
-              "github_checks_detail": json.dumps(
-                  context["github_checks_detail"],
-                  separators=(",", ":"),
-              ),
-              "terraform_validate": context["terraform_validate"],
-              "checkov_scan_result": context["checkov_scan_result"],
-              "codeql_scan_result": context["codeql_scan_result"],
-              "gitleaks_scan_result": context["gitleaks_scan_result"],
-              "security_scan_result": context["security_scan_result"],
-              "terraform_plan_summary": (
-                  "Not collected by this PR approval workflow."
-              ),
+              "deployment_gate_context": "snow-deployment-gate",
+              "github_check_status": g("GITHUB_CHECKS_STATUS", ""),
+              "github_checks_status": g("GITHUB_CHECKS_STATUS", ""),
+              "github_checks_detail": g("GITHUB_CHECKS_DETAIL", ""),
+              "terraform_validate": g("TERRAFORM_VALIDATE", ""),
+              "checkov_scan_result": g("CHECKOV_SCAN_RESULT", ""),
+              "codeql_scan_result": g("CODEQL_SCAN_RESULT", ""),
+              "gitleaks_scan_result": g("GITLEAKS_SCAN_RESULT", ""),
+              "security_scan_result": g("SECURITY_SCAN_RESULT", ""),
+              "terraform_plan_summary": "Not collected by the PR approval workflow.",
               "pipeline_run_id": run_id,
               "pipeline_url": run_url,
               "artifact_url": run_url,
@@ -440,22 +452,21 @@ jobs:
               "impact": "medium",
               "justification": (
                   "Production-bound Terraform module change submitted "
-                  "for ServiceNow approval."
+                  "for CCoE approval in ServiceNow."
               ),
               "implementation_plan": (
-                  "Merge to main only after ServiceNow approval sets "
-                  "the snow-approval GitHub status to success."
+                  "Merge to main only after ServiceNow approval "
+                  "sets the snow-approval GitHub status to success."
               ),
               "impact_summary": (
-                  "Production-bound Terraform change submitted for "
-                  "ServiceNow approval."
+                  "Production-bound Terraform module change submitted "
+                  "for ServiceNow approval."
               ),
               "rollback_plan": (
                   "If rejected, do not merge. If deployed and rollback "
                   "is required, revert the PR or apply the previous "
-                  "known-good Terraform version."
+                  "known-good Terraform module version."
               ),
-              "deployment_callback_expected": False,
               "planned_start_date": now,
               "planned_end_date": end,
               "triggered_at": now,
@@ -464,7 +475,7 @@ jobs:
           print(json.dumps(payload, indent=2))
           PY
 
-          echo "Custom ServiceNow payload created."
+          python3 -c 'import json; p=json.load(open("snow-payload.json")); print(json.dumps({"event_type": p["event_type"], "pr_number": p["pr_number"], "github_checks_status": p["github_checks_status"], "cmdb_ci_name": p["cmdb_ci_name"]}, indent=2))'
 
       - name: Send enriched approval payload to ServiceNow
         shell: bash
@@ -475,8 +486,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          for item in SN_INSTANCE_URL SN_API_PATH BEARER
-          do
+          for item in SN_INSTANCE_URL SN_API_PATH BEARER; do
             if [ -z "${!item:-}" ]; then
               echo "Missing required value: ${item}"
               exit 1
@@ -485,22 +495,13 @@ jobs:
 
           if [ ! -f snow-payload.json ]; then
             echo "snow-payload.json was not created."
-            ls -la
             exit 1
           fi
 
-          if [[ "${SN_API_PATH}" == https://* ]]; then
-            URL="${SN_API_PATH}"
-          else
-            URL="${SN_INSTANCE_URL%/}/${SN_API_PATH#/}"
-          fi
+          URL="${SN_INSTANCE_URL%/}/${SN_API_PATH#/}"
 
-          if [[ "${URL}" != https://* ]]; then
-            echo "ServiceNow approval endpoint must use HTTPS."
-            exit 1
-          fi
-
-          echo "Sending approval payload to ServiceNow."
+          echo "Sending approval payload to ServiceNow:"
+          echo "${URL}"
 
           RESPONSE_FILE="$(mktemp)"
           trap 'rm -f "${RESPONSE_FILE}"' EXIT
@@ -511,9 +512,6 @@ jobs:
             curl \
               --silent \
               --show-error \
-              --fail-with-body \
-              --proto '=https' \
-              --tlsv1.2 \
               --connect-timeout 20 \
               --max-time 120 \
               --output "${RESPONSE_FILE}" \
@@ -532,7 +530,7 @@ jobs:
 
           echo "ServiceNow approval POST HTTP status: ${HTTP_STATUS:-no-response}"
 
-          if [ "${CURL_EXIT}" -ne 0 ] && [ "${CURL_EXIT}" -ne 22 ]; then
+          if [ "${CURL_EXIT}" -ne 0 ]; then
             echo "Connection to the ServiceNow approval endpoint failed."
             echo "curl exit code: ${CURL_EXIT}"
             exit "${CURL_EXIT}"
@@ -540,27 +538,9 @@ jobs:
 
           if [[ ! "${HTTP_STATUS}" =~ ^2[0-9][0-9]$ ]]; then
             echo "ServiceNow did not accept the approval payload."
-
-            python3 - "${RESPONSE_FILE}" <<'PY'
-            import json
-            import sys
-            from pathlib import Path
-
-            raw = Path(sys.argv[1]).read_text(errors="replace")
-
-            try:
-                data = json.loads(raw)
-                message = (
-                    data.get("error")
-                    or data.get("message")
-                    or data.get("error_description")
-                    or "No error message returned."
-                )
-                print(f"ServiceNow response: {str(message)[:1000]}")
-            except Exception:
-                print("ServiceNow returned a non-JSON error response.")
-            PY
-
+            echo "ServiceNow response:"
+            tr -d '\r' < "${RESPONSE_FILE}" | head -c 1500 || true
+            echo
             exit 1
           fi
 
