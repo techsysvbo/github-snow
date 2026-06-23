@@ -267,7 +267,7 @@ jobs:
             --url "${SN_OAUTH_TOKEN_URL}"
             --header "Content-Type: application/x-www-form-urlencoded"
             --header "Accept: application/json"
-            --data-urlencode "grant_type=client_credentials"
+            --data-urlencode "grant_type=password"
             --data-urlencode "client_id=${SN_OAUTH_CLIENT_ID}"
             --data-urlencode "client_secret=${SN_OAUTH_CLIENT_SECRET}"
             --data-urlencode "username=${SN_OAUTH_USERNAME}"
@@ -292,7 +292,7 @@ jobs:
           fi
 
           if [[ ! "${HTTP_STATUS}" =~ ^2[0-9][0-9]$ ]]; then
-            echo "ServiceNow rejected the OAuth request (grant_type=client_credentials with username/password)."
+            echo "ServiceNow rejected the OAuth request (grant_type=password)."
             echo "ServiceNow response:"
             tr -d '\r' < "${TOKEN_FILE}" | head -c 1500 || true
             echo
