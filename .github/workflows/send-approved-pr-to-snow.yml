@@ -234,8 +234,6 @@ jobs:
           SN_OAUTH_TOKEN_URL: ${{ secrets.SN_OAUTH_TOKEN_URL }}
           SN_OAUTH_CLIENT_ID: ${{ secrets.SN_OAUTH_CLIENT_ID }}
           SN_OAUTH_CLIENT_SECRET: ${{ secrets.SN_OAUTH_CLIENT_SECRET }}
-          SN_OAUTH_USERNAME: ${{ secrets.SN_OAUTH_USERNAME }}
-          SN_OAUTH_PASSWORD: ${{ secrets.SN_OAUTH_PASSWORD }}
         run: |
           set -euo pipefail
 
@@ -262,25 +260,8 @@ jobs:
             printf '%s' "${SN_OAUTH_CLIENT_SECRET}" | tr -d '\r\n'
           )"
 
-          SN_OAUTH_USERNAME="$(
-            printf '%s' "${SN_OAUTH_USERNAME:-}" | tr -d '\r\n'
-          )"
-
-          SN_OAUTH_PASSWORD="$(
-            printf '%s' "${SN_OAUTH_PASSWORD:-}" | tr -d '\r\n'
-          )"
-
-          SN_OAUTH_GRANT_TYPE="$(
-            printf '%s' "${SN_OAUTH_GRANT_TYPE:-client_credentials}" | tr -d '\r\n' | tr '[:upper:]' '[:lower:]'
-          )"
-
           if [[ "${SN_OAUTH_TOKEN_URL}" != https://* ]]; then
             echo "SN_OAUTH_TOKEN_URL must use HTTPS."
-            exit 1
-          fi
-
-          if [[ "${SN_OAUTH_GRANT_TYPE}" != "client_credentials" && "${SN_OAUTH_GRANT_TYPE}" != "password" ]]; then
-            echo "SN_OAUTH_GRANT_TYPE must be 'client_credentials' or 'password'."
             exit 1
           fi
 
@@ -293,6 +274,9 @@ jobs:
           )"
 
           echo "Requesting ServiceNow OAuth token from host: ${OAUTH_HOST}"
+
+          TOKEN_FILE="$(mktemp)"
+          trap 'rm -f "${TOKEN_FILE}"' EXIT
 
           CURL_ARGS=(
             --silent
@@ -313,7 +297,7 @@ jobs:
             --url "${SN_OAUTH_TOKEN_URL}"
             --header "Content-Type: application/x-www-form-urlencoded"
             --header "Accept: application/json"
-            --data-urlencode "grant_type=${SN_OAUTH_GRANT_TYPE}"
+            --data-urlencode "grant_type=client_credentials"
             --data-urlencode "client_id=${SN_OAUTH_CLIENT_ID}"
             --data-urlencode "client_secret=${SN_OAUTH_CLIENT_SECRET}"
           )
@@ -321,21 +305,6 @@ jobs:
           if [ -n "${SSL_CERT_FILE:-}" ] && [ -f "${SSL_CERT_FILE}" ]; then
             CURL_ARGS+=(--cacert "${SSL_CERT_FILE}")
           fi
-
-          if [ "${SN_OAUTH_GRANT_TYPE}" = "password" ]; then
-            if [ -z "${SN_OAUTH_USERNAME}" ] || [ -z "${SN_OAUTH_PASSWORD}" ]; then
-              echo "SN_OAUTH_USERNAME and SN_OAUTH_PASSWORD are required for password grant type."
-              exit 1
-            fi
-
-            CURL_ARGS+=(
-              --data-urlencode "username=${SN_OAUTH_USERNAME}"
-              --data-urlencode "password=${SN_OAUTH_PASSWORD}"
-            )
-          fi
-
-          TOKEN_FILE="$(mktemp)"
-          trap 'rm -f "${TOKEN_FILE}"' EXIT
 
           set +e
 
