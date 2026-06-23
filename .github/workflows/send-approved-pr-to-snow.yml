@@ -222,10 +222,12 @@ jobs:
           SN_OAUTH_TOKEN_URL: ${{ secrets.SN_OAUTH_TOKEN_URL }}
           SN_OAUTH_CLIENT_ID: ${{ secrets.SN_OAUTH_CLIENT_ID }}
           SN_OAUTH_CLIENT_SECRET: ${{ secrets.SN_OAUTH_CLIENT_SECRET }}
+          SN_OAUTH_USERNAME: ${{ secrets.SN_OAUTH_USERNAME }}
+          SN_OAUTH_PASSWORD: ${{ secrets.SN_OAUTH_PASSWORD }}
         run: |
           set -euo pipefail
 
-          for item in SN_OAUTH_TOKEN_URL SN_OAUTH_CLIENT_ID SN_OAUTH_CLIENT_SECRET; do
+          for item in SN_OAUTH_TOKEN_URL SN_OAUTH_CLIENT_ID SN_OAUTH_CLIENT_SECRET SN_OAUTH_USERNAME SN_OAUTH_PASSWORD; do
             if [ -z "${!item:-}" ]; then
               echo "Missing required GitHub secret: ${item}"
               exit 1
@@ -235,7 +237,8 @@ jobs:
           SN_OAUTH_TOKEN_URL="$(printf '%s' "${SN_OAUTH_TOKEN_URL}" | tr -d '\r\n')"
           SN_OAUTH_CLIENT_ID="$(printf '%s' "${SN_OAUTH_CLIENT_ID}" | tr -d '\r\n')"
           SN_OAUTH_CLIENT_SECRET="$(printf '%s' "${SN_OAUTH_CLIENT_SECRET}" | tr -d '\r\n')"
-          SN_OAUTH_SCOPE="$(printf '%s' "${SN_OAUTH_SCOPE:-}" | tr -d '\r\n')"
+          SN_OAUTH_USERNAME="$(printf '%s' "${SN_OAUTH_USERNAME}" | tr -d '\r\n')"
+          SN_OAUTH_PASSWORD="$(printf '%s' "${SN_OAUTH_PASSWORD}" | tr -d '\r\n')"
 
           if [[ "${SN_OAUTH_TOKEN_URL}" != https://* ]]; then
             echo "SN_OAUTH_TOKEN_URL must use HTTPS."
@@ -243,8 +246,7 @@ jobs:
           fi
 
           TOKEN_FILE="$(mktemp)"
-          TOKEN_FILE_BASIC="$(mktemp)"
-          trap 'rm -f "${TOKEN_FILE}" "${TOKEN_FILE_BASIC}"' EXIT
+          trap 'rm -f "${TOKEN_FILE}"' EXIT
 
           CURL_ARGS=(
             --silent
@@ -268,11 +270,9 @@ jobs:
             --data-urlencode "grant_type=client_credentials"
             --data-urlencode "client_id=${SN_OAUTH_CLIENT_ID}"
             --data-urlencode "client_secret=${SN_OAUTH_CLIENT_SECRET}"
+            --data-urlencode "username=${SN_OAUTH_USERNAME}"
+            --data-urlencode "password=${SN_OAUTH_PASSWORD}"
           )
-
-          if [ -n "${SN_OAUTH_SCOPE}" ]; then
-            CURL_ARGS+=(--data-urlencode "scope=${SN_OAUTH_SCOPE}")
-          fi
 
           if [ -n "${SSL_CERT_FILE:-}" ] && [ -f "${SSL_CERT_FILE}" ]; then
             CURL_ARGS+=(--cacert "${SSL_CERT_FILE}")
@@ -283,55 +283,6 @@ jobs:
           CURL_EXIT=$?
           set -e
 
-          # Some OAuth servers require client authentication via Basic auth
-          # for client_credentials grant. Retry once with Basic if first call
-          # was unauthorized.
-          if [ "${HTTP_STATUS}" = "401" ] || [ "${HTTP_STATUS}" = "403" ]; then
-            BASIC_CREDENTIALS="$(printf '%s:%s' "${SN_OAUTH_CLIENT_ID}" "${SN_OAUTH_CLIENT_SECRET}" | base64 -w 0)"
-
-            CURL_ARGS_BASIC=(
-              --silent
-              --show-error
-              --fail-with-body
-              --proto '=https'
-              --tlsv1.2
-              --http1.1
-              --connect-timeout 20
-              --max-time 90
-              --retry 2
-              --retry-delay 2
-              --retry-max-time 30
-              --retry-all-errors
-              --output "${TOKEN_FILE_BASIC}"
-              --write-out "%{http_code}"
-              --request POST
-              --url "${SN_OAUTH_TOKEN_URL}"
-              --header "Authorization: Basic ${BASIC_CREDENTIALS}"
-              --header "Content-Type: application/x-www-form-urlencoded"
-              --header "Accept: application/json"
-              --data-urlencode "grant_type=client_credentials"
-            )
-
-              if [ -n "${SN_OAUTH_SCOPE}" ]; then
-                CURL_ARGS_BASIC+=(--data-urlencode "scope=${SN_OAUTH_SCOPE}")
-              fi
-
-            if [ -n "${SSL_CERT_FILE:-}" ] && [ -f "${SSL_CERT_FILE}" ]; then
-              CURL_ARGS_BASIC+=(--cacert "${SSL_CERT_FILE}")
-            fi
-
-            set +e
-            HTTP_STATUS_BASIC="$(curl "${CURL_ARGS_BASIC[@]}")"
-            CURL_EXIT_BASIC=$?
-            set -e
-
-            if [ "${CURL_EXIT_BASIC}" -eq 0 ] || [ "${CURL_EXIT_BASIC}" -eq 22 ]; then
-              HTTP_STATUS="${HTTP_STATUS_BASIC}"
-              CURL_EXIT="${CURL_EXIT_BASIC}"
-              cp "${TOKEN_FILE_BASIC}" "${TOKEN_FILE}"
-            fi
-          fi
-
           echo "ServiceNow OAuth HTTP status: ${HTTP_STATUS:-no-response}"
 
           if [ "${CURL_EXIT}" -ne 0 ] && [ "${CURL_EXIT}" -ne 22 ]; then
@@ -341,8 +292,7 @@ jobs:
           fi
 
           if [[ ! "${HTTP_STATUS}" =~ ^2[0-9][0-9]$ ]]; then
-            echo "ServiceNow rejected the OAuth request (grant_type=client_credentials)."
-            echo "Tried client authentication methods: request-body client_id/client_secret, then Basic auth header."
+            echo "ServiceNow rejected the OAuth request (grant_type=client_credentials with username/password)."
             echo "ServiceNow response:"
             tr -d '\r' < "${TOKEN_FILE}" | head -c 1500 || true
             echo
