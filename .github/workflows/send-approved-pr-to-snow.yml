@@ -242,7 +242,8 @@ jobs:
           fi
 
           TOKEN_FILE="$(mktemp)"
-          trap 'rm -f "${TOKEN_FILE}"' EXIT
+          TOKEN_FILE_BASIC="$(mktemp)"
+          trap 'rm -f "${TOKEN_FILE}" "${TOKEN_FILE_BASIC}"' EXIT
 
           CURL_ARGS=(
             --silent
@@ -277,6 +278,51 @@ jobs:
           CURL_EXIT=$?
           set -e
 
+          # Some OAuth servers require client authentication via Basic auth
+          # for client_credentials grant. Retry once with Basic if first call
+          # was unauthorized.
+          if [ "${HTTP_STATUS}" = "401" ] || [ "${HTTP_STATUS}" = "403" ]; then
+            BASIC_CREDENTIALS="$(printf '%s:%s' "${SN_OAUTH_CLIENT_ID}" "${SN_OAUTH_CLIENT_SECRET}" | base64 -w 0)"
+
+            CURL_ARGS_BASIC=(
+              --silent
+              --show-error
+              --fail-with-body
+              --proto '=https'
+              --tlsv1.2
+              --http1.1
+              --connect-timeout 20
+              --max-time 90
+              --retry 2
+              --retry-delay 2
+              --retry-max-time 30
+              --retry-all-errors
+              --output "${TOKEN_FILE_BASIC}"
+              --write-out "%{http_code}"
+              --request POST
+              --url "${SN_OAUTH_TOKEN_URL}"
+              --header "Authorization: Basic ${BASIC_CREDENTIALS}"
+              --header "Content-Type: application/x-www-form-urlencoded"
+              --header "Accept: application/json"
+              --data-urlencode "grant_type=client_credentials"
+            )
+
+            if [ -n "${SSL_CERT_FILE:-}" ] && [ -f "${SSL_CERT_FILE}" ]; then
+              CURL_ARGS_BASIC+=(--cacert "${SSL_CERT_FILE}")
+            fi
+
+            set +e
+            HTTP_STATUS_BASIC="$(curl "${CURL_ARGS_BASIC[@]}")"
+            CURL_EXIT_BASIC=$?
+            set -e
+
+            if [ "${CURL_EXIT_BASIC}" -eq 0 ] || [ "${CURL_EXIT_BASIC}" -eq 22 ]; then
+              HTTP_STATUS="${HTTP_STATUS_BASIC}"
+              CURL_EXIT="${CURL_EXIT_BASIC}"
+              cp "${TOKEN_FILE_BASIC}" "${TOKEN_FILE}"
+            fi
+          fi
+
           echo "ServiceNow OAuth HTTP status: ${HTTP_STATUS:-no-response}"
 
           if [ "${CURL_EXIT}" -ne 0 ] && [ "${CURL_EXIT}" -ne 22 ]; then
@@ -287,6 +333,7 @@ jobs:
 
           if [[ ! "${HTTP_STATUS}" =~ ^2[0-9][0-9]$ ]]; then
             echo "ServiceNow rejected the OAuth request (grant_type=client_credentials)."
+            echo "Tried client authentication methods: request-body client_id/client_secret, then Basic auth header."
             echo "ServiceNow response:"
             tr -d '\r' < "${TOKEN_FILE}" | head -c 1500 || true
             echo
