@@ -1,44 +1,27 @@
-name: terraform-deploy-after-merge
+# send-approved-pr-to-snow.yml
+name: send-approved-pr-to-snow
 
 on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:
+  pull_request_review:
+    types:
+      - submitted
 
 permissions:
-  id-token: write
   contents: read
   pull-requests: read
-  actions: read
+  statuses: read
   checks: read
 
-concurrency:
-  group: tf-deploy-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
-  deploy:
-    name: terraform-deploy-production
+  send-to-snow:
+    name: send-to-snow
+    if: >-
+      github.event.review.state == 'approved' &&
+      github.event.pull_request.base.ref == 'main'
     runs-on: [self-hosted, linux, x64, snow-github]
-    environment: production
-
-    env:
-      AWS_REGION: ${{ secrets.AWS_REGION }}
-      TF_ENV_PATH: terraform/environments/prod
-      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
-      TF_LOCK_TABLE: ${{ vars.TF_LOCK_TABLE }}
-      SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
-      SN_DEPLOYMENT_CALLBACK_PATH: ${{ secrets.SN_DEPLOYMENT_CALLBACK_PATH }}
-      SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
-      SN_OAUTH_TOKEN_URL: ${{ secrets.SN_OAUTH_TOKEN_URL }}
-      SN_OAUTH_CLIENT_ID: ${{ secrets.SN_OAUTH_CLIENT_ID }}
-      SN_OAUTH_CLIENT_SECRET: ${{ secrets.SN_OAUTH_CLIENT_SECRET }}
-      SN_OAUTH_USERNAME: ${{ secrets.SN_OAUTH_USERNAME }}
-      SN_OAUTH_PASSWORD: ${{ secrets.SN_OAUTH_PASSWORD }}
 
     steps:
-      - name: Checkout main
+      - name: Checkout repository
         uses: actions/checkout@v5
 
       - name: Detect CA bundle path
@@ -60,95 +43,30 @@ jobs:
           echo "CURL_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
           echo "GIT_SSL_CAINFO=${CA_BUNDLE}" >> "$GITHUB_ENV"
           echo "NODE_EXTRA_CA_CERTS=${CA_BUNDLE}" >> "$GITHUB_ENV"
-          echo "AWS_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
 
-      - name: Collect merged PR metadata
-        id: pr_meta
+      - name: Collect PR metadata and GitHub check results
+        id: github_data
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
 
           gh api \
             -H "Accept: application/vnd.github+json" \
-            "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" > merged-prs.json
-
-          python3 <<'PY' > pr-meta-outputs.txt
-          import json
-          from pathlib import Path
-
-          data = json.loads(Path("merged-prs.json").read_text())
-          pr = data[0] if isinstance(data, list) and data else {}
-
-          outputs = {
-              "pr_number": pr.get("number", ""),
-              "pr_link": pr.get("html_url", ""),
-              "pr_title": pr.get("title", ""),
-              "pr_author": pr.get("user", {}).get("login", ""),
-              "pr_state": pr.get("state", ""),
-              "requested_by": pr.get("user", {}).get("login", ""),
-              "source_branch": pr.get("head", {}).get("ref", ""),
-              "target_branch": pr.get("base", {}).get("ref", ""),
-              "head_sha": pr.get("head", {}).get("sha", ""),
-              "mergeable": "" if pr.get("mergeable") is None else str(pr.get("mergeable")).lower(),
-              "mergeable_state": pr.get("mergeable_state", ""),
-              "closed_at": pr.get("closed_at") or "",
-              "merged_at": pr.get("merged_at") or ""
-          }
-
-          for key, value in outputs.items():
-              print(f"{key}<<EOF")
-              print("" if value is None else str(value))
-              print("EOF")
-          PY
-
-          cat pr-meta-outputs.txt >> "$GITHUB_OUTPUT"
-
-      - name: Collect PR GitHub check results
-        id: github_checks
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_HEAD_SHA: ${{ steps.pr_meta.outputs.head_sha }}
-        run: |
-          set -euo pipefail
-
-          if [ -z "${PR_HEAD_SHA:-}" ]; then
-            {
-              echo "github_checks_status<<EOF"
-              echo "unknown"
-              echo "EOF"
-              echo "checkov_scan_result<<EOF"
-              echo "UNKNOWN"
-              echo "EOF"
-              echo "codeql_scan_result<<EOF"
-              echo "UNKNOWN"
-              echo "EOF"
-              echo "gitleaks_scan_result<<EOF"
-              echo "UNKNOWN"
-              echo "EOF"
-              echo "terraform_validate<<EOF"
-              echo "UNKNOWN"
-              echo "EOF"
-              echo "security_scan_result<<EOF"
-              echo "UNKNOWN"
-              echo "EOF"
-              echo "github_checks_detail<<EOF"
-              echo "{}"
-              echo "EOF"
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > pr.json
 
           gh api \
             -H "Accept: application/vnd.github+json" \
-            "repos/${GITHUB_REPOSITORY}/commits/${PR_HEAD_SHA}/check-runs?per_page=100" > check-runs.json
+            "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?per_page=100" > check-runs.json
 
-          python3 <<'PY' > github-checks-outputs.txt
+          python3 <<'PY' > github-outputs.txt
           import json
           from pathlib import Path
 
+          pr = json.loads(Path("pr.json").read_text())
           checks_payload = json.loads(Path("check-runs.json").read_text())
           check_runs = checks_payload.get("check_runs", [])
 
@@ -171,6 +89,7 @@ jobs:
 
           def matching_results(matchers):
               results = []
+
               for run in check_runs:
                   name = norm(run.get("name"))
                   workflow_name = norm(run.get("check_suite", {}).get("app", {}).get("name"))
@@ -186,6 +105,7 @@ jobs:
                               "html_url": run.get("html_url", "")
                           })
                           break
+
               return results
 
           def single_result(matchers):
@@ -244,9 +164,23 @@ jobs:
               "checkov_scan_result": checkov,
               "codeql_scan_result": codeql,
               "gitleaks_scan_result": gitleaks,
+              "terraform_dev_result": terraform_dev,
+              "terraform_prod_result": terraform_prod,
               "terraform_validate": "PASSED" if terraform_dev in ("PASSED", "SKIPPED") and terraform_prod in ("PASSED", "SKIPPED") else "FAILED",
               "security_scan_result": "PASSED" if checkov in ("PASSED", "SKIPPED") and codeql in ("PASSED", "SKIPPED") and gitleaks in ("PASSED", "SKIPPED") else "FAILED",
-              "github_checks_detail": json.dumps(details, separators=(",", ":"))
+              "github_checks_detail": json.dumps(details, separators=(",", ":")),
+              "pr_author": pr.get("user", {}).get("login", ""),
+              "pr_state": pr.get("state", ""),
+              "requested_by": pr.get("user", {}).get("login", ""),
+              "mergeable": "" if pr.get("mergeable") is None else str(pr.get("mergeable")).lower(),
+              "mergeable_state": pr.get("mergeable_state", ""),
+              "closed_at": pr.get("closed_at") or "",
+              "merged_at": pr.get("merged_at") or "",
+              "pr_url": pr.get("html_url", ""),
+              "pr_title": pr.get("title", ""),
+              "source_branch": pr.get("head", {}).get("ref", ""),
+              "target_branch": pr.get("base", {}).get("ref", ""),
+              "head_sha": pr.get("head", {}).get("sha", "")
           }
 
           for key, value in outputs.items():
@@ -255,96 +189,34 @@ jobs:
               print("EOF")
           PY
 
-          cat github-checks-outputs.txt >> "$GITHUB_OUTPUT"
+          cat github-outputs.txt >> "$GITHUB_OUTPUT"
 
-      - name: Validate deployment configuration
+      - name: Stop if GitHub checks are not successful
         shell: bash
+        env:
+          GITHUB_CHECKS_STATUS: ${{ steps.github_data.outputs.github_checks_status }}
+          CHECKOV_RESULT: ${{ steps.github_data.outputs.checkov_scan_result }}
+          CODEQL_RESULT: ${{ steps.github_data.outputs.codeql_scan_result }}
+          GITLEAKS_RESULT: ${{ steps.github_data.outputs.gitleaks_scan_result }}
+          TERRAFORM_DEV_RESULT: ${{ steps.github_data.outputs.terraform_dev_result }}
+          TERRAFORM_PROD_RESULT: ${{ steps.github_data.outputs.terraform_prod_result }}
         run: |
           set -euo pipefail
 
-          missing="false"
+          echo "GitHub checks status: ${GITHUB_CHECKS_STATUS}"
+          echo "Checkov: ${CHECKOV_RESULT}"
+          echo "CodeQL: ${CODEQL_RESULT}"
+          echo "Gitleaks: ${GITLEAKS_RESULT}"
+          echo "Terraform dev: ${TERRAFORM_DEV_RESULT}"
+          echo "Terraform prod: ${TERRAFORM_PROD_RESULT}"
 
-          for item in AWS_REGION TF_STATE_BUCKET TF_LOCK_TABLE SN_INSTANCE_URL SN_DEPLOYMENT_CALLBACK_PATH SN_GITHUB_SHARED_SECRET SN_OAUTH_TOKEN_URL SN_OAUTH_CLIENT_ID SN_OAUTH_CLIENT_SECRET; do
-            if [ -z "${!item:-}" ]; then
-              echo "Missing required value: ${item}"
-              missing="true"
-            fi
-          done
-
-          if [ "${missing}" = "true" ]; then
-            echo "Fix missing GitHub secrets or variables before deployment."
+          if [ "${GITHUB_CHECKS_STATUS}" != "success" ]; then
+            echo "GitHub checks are not all successful. Not sending approval payload to ServiceNow."
             exit 1
           fi
 
-          echo "Deployment configuration is present."
-          echo "AWS_REGION=${AWS_REGION}"
-          echo "TF_STATE_BUCKET=${TF_STATE_BUCKET}"
-          echo "TF_LOCK_TABLE=${TF_LOCK_TABLE}"
-
-      - name: Configure AWS credentials using GitHub OIDC
-        uses: aws-actions/configure-aws-credentials@v5
-        with:
-          role-to-assume: ${{ secrets.AWS_PROD_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-          role-session-name: gha-prod-deploy-${{ github.run_id }}
-
-      - name: Verify AWS identity
-        run: aws sts get-caller-identity
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.9.5
-            # terraform_wrapper: false
-
-      - name: Terraform init
-        working-directory: ${{ env.TF_ENV_PATH }}
-        run: |
-          set -euo pipefail
-
-          terraform init -input=false \
-            -backend-config="bucket=${TF_STATE_BUCKET}" \
-            -backend-config="region=${AWS_REGION}" \
-            -backend-config="dynamodb_table=${TF_LOCK_TABLE}"
-
-      - name: Terraform validate
-        working-directory: ${{ env.TF_ENV_PATH }}
-        run: terraform validate
-
-      - name: Terraform plan
-        id: plan
-        working-directory: ${{ env.TF_ENV_PATH }}
-        run: |
-          set -euo pipefail
-
-          terraform plan -input=false -out=tfplan
-          terraform show -no-color tfplan > plan_summary.txt
-
-          PLAN_LINE="$(grep -E 'Plan:|No changes' plan_summary.txt | tail -1 || echo 'Plan: see artifact')"
-
-          {
-            echo "summary<<EOF"
-            echo "$PLAN_LINE"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Terraform apply
-        id: apply
-        working-directory: ${{ env.TF_ENV_PATH }}
-        run: terraform apply -input=false -auto-approve tfplan
-
-      - name: Upload Terraform plan artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: terraform-plan-${{ github.run_id }}
-          path: ${{ env.TF_ENV_PATH }}/plan_summary.txt
-          retention-days: 90
-          if-no-files-found: ignore
-
       - name: Get ServiceNow OAuth token
-        id: snow_token
-        if: always()
+        id: token
         shell: bash
         env:
           SN_OAUTH_TOKEN_URL: ${{ secrets.SN_OAUTH_TOKEN_URL }}
@@ -460,55 +332,44 @@ jobs:
           echo "::add-mask::${ACCESS_TOKEN}"
           echo "token=${ACCESS_TOKEN}" >> "$GITHUB_OUTPUT"
 
-      - name: Notify ServiceNow deployment result
-        if: always()
+      - name: Build enriched approval payload
         shell: bash
         env:
-          PR_NUMBER: ${{ steps.pr_meta.outputs.pr_number }}
-          PR_LINK: ${{ steps.pr_meta.outputs.pr_link }}
-          PR_TITLE: ${{ steps.pr_meta.outputs.pr_title }}
-          PR_AUTHOR: ${{ steps.pr_meta.outputs.pr_author }}
-          PR_STATE: ${{ steps.pr_meta.outputs.pr_state }}
-          REQUESTED_BY: ${{ steps.pr_meta.outputs.requested_by }}
-          SOURCE_BRANCH: ${{ steps.pr_meta.outputs.source_branch }}
-          TARGET_BRANCH: ${{ steps.pr_meta.outputs.target_branch }}
-          PR_HEAD_SHA: ${{ steps.pr_meta.outputs.head_sha }}
-          MERGEABLE: ${{ steps.pr_meta.outputs.mergeable }}
-          MERGEABLE_STATE: ${{ steps.pr_meta.outputs.mergeable_state }}
-          CLOSED_AT: ${{ steps.pr_meta.outputs.closed_at }}
-          MERGED_AT: ${{ steps.pr_meta.outputs.merged_at }}
-          GITHUB_CHECKS_STATUS: ${{ steps.github_checks.outputs.github_checks_status }}
-          GITHUB_CHECKS_DETAIL: ${{ steps.github_checks.outputs.github_checks_detail }}
-          CHECKOV_SCAN_RESULT: ${{ steps.github_checks.outputs.checkov_scan_result }}
-          CODEQL_SCAN_RESULT: ${{ steps.github_checks.outputs.codeql_scan_result }}
-          GITLEAKS_SCAN_RESULT: ${{ steps.github_checks.outputs.gitleaks_scan_result }}
-          TERRAFORM_VALIDATE: ${{ steps.github_checks.outputs.terraform_validate }}
-          SECURITY_SCAN_RESULT: ${{ steps.github_checks.outputs.security_scan_result }}
-          DEPLOY_OUTCOME: ${{ steps.apply.outcome }}
-          PLAN_SUMMARY: ${{ steps.plan.outputs.summary }}
-          BEARER: ${{ steps.snow_token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          APPROVER: ${{ github.event.review.user.login }}
+          REVIEW_BODY: ${{ github.event.review.body }}
+          PR_TITLE: ${{ steps.github_data.outputs.pr_title }}
+          PR_LINK: ${{ steps.github_data.outputs.pr_url }}
+          SOURCE_BRANCH: ${{ steps.github_data.outputs.source_branch }}
+          TARGET_BRANCH: ${{ steps.github_data.outputs.target_branch }}
+          HEAD_SHA: ${{ steps.github_data.outputs.head_sha }}
+          PR_AUTHOR: ${{ steps.github_data.outputs.pr_author }}
+          PR_STATE: ${{ steps.github_data.outputs.pr_state }}
+          REQUESTED_BY: ${{ steps.github_data.outputs.requested_by }}
+          MERGEABLE: ${{ steps.github_data.outputs.mergeable }}
+          MERGEABLE_STATE: ${{ steps.github_data.outputs.mergeable_state }}
+          CLOSED_AT: ${{ steps.github_data.outputs.closed_at }}
+          MERGED_AT: ${{ steps.github_data.outputs.merged_at }}
+          GITHUB_CHECKS_STATUS: ${{ steps.github_data.outputs.github_checks_status }}
+          GITHUB_CHECKS_DETAIL: ${{ steps.github_data.outputs.github_checks_detail }}
+          TERRAFORM_VALIDATE: ${{ steps.github_data.outputs.terraform_validate }}
+          CHECKOV_SCAN_RESULT: ${{ steps.github_data.outputs.checkov_scan_result }}
+          CODEQL_SCAN_RESULT: ${{ steps.github_data.outputs.codeql_scan_result }}
+          GITLEAKS_SCAN_RESULT: ${{ steps.github_data.outputs.gitleaks_scan_result }}
+          SECURITY_SCAN_RESULT: ${{ steps.github_data.outputs.security_scan_result }}
+          SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
         run: |
           set -euo pipefail
 
-          if [ "${DEPLOY_OUTCOME}" = "success" ]; then
-            DSTATUS="success"
-            DMSG="Terraform apply succeeded."
-          else
-            DSTATUS="failure"
-            DMSG="Terraform apply failed or was skipped."
-          fi
-
-          export DSTATUS
-          export DMSG
-
-          CALLBACK_URL="${SN_INSTANCE_URL}${SN_DEPLOYMENT_CALLBACK_PATH}"
-
-          python3 - <<'PY' > deployment-result.json
+          python3 <<'PY' > snow-payload.json
+          import datetime
           import json
           import os
-          import datetime
 
           g = os.environ.get
+
+          now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+          end = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
           repo_full = g("GITHUB_REPOSITORY", "")
           owner = repo_full.split("/")[0] if "/" in repo_full else ""
@@ -516,22 +377,25 @@ jobs:
 
           server = g("GITHUB_SERVER_URL", "https://github.com")
           run_id = g("GITHUB_RUN_ID", "")
-          merge_sha = g("GITHUB_SHA", "")
-          now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
           run_url = f"{server}/{repo_full}/actions/runs/{run_id}"
+
+          review_body = g("REVIEW_BODY", "").strip()
+          if not review_body:
+              review_body = f"PR approved in GitHub by {g('APPROVER', '')}."
 
           payload = {
               "shared_secret": g("SN_GITHUB_SHARED_SECRET", ""),
-              "event_type": "deployment_result",
-              "repo_name": repo_full,
-              "repository_id": g("GITHUB_REPOSITORY_ID", ""),
+              "event_type": "pull_request_ready_for_snow_approval",
               "owner": owner,
               "repo": repo,
+              "repo_name": repo_full,
+              "repository_id": g("GITHUB_REPOSITORY_ID", ""),
               "pr_number": int(g("PR_NUMBER", "0") or 0),
               "pr_link": g("PR_LINK", ""),
               "pr_title": g("PR_TITLE", ""),
               "source_branch": g("SOURCE_BRANCH", ""),
               "target_branch": g("TARGET_BRANCH", ""),
+              "commit_sha": g("HEAD_SHA", ""),
               "pr_author": g("PR_AUTHOR", ""),
               "pr_state": g("PR_STATE", ""),
               "requested_by": g("REQUESTED_BY", ""),
@@ -539,8 +403,16 @@ jobs:
               "mergeable_state": g("MERGEABLE_STATE", ""),
               "closed_at": g("CLOSED_AT", ""),
               "merged_at": g("MERGED_AT", ""),
-              "commit_sha": g("PR_HEAD_SHA", "") or merge_sha,
-              "merge_commit_sha": merge_sha,
+              "requester": g("REQUESTED_BY", ""),
+              "requestor_github_username": g("REQUESTED_BY", ""),
+              "requestor_email": "FROM_PR_COMMENT_OR_OKTA_MAPPING",
+              "approvers": [g("APPROVER", "")],
+              "sme_approval_1": g("APPROVER", ""),
+              "approval_notes": review_body,
+              "status": "waiting_for_snow",
+              "approval_state": "requested",
+              "status_context": "snow-approval",
+              "deployment_gate_context": "snow-deployment-gate",
               "github_check_status": g("GITHUB_CHECKS_STATUS", ""),
               "github_checks_status": g("GITHUB_CHECKS_STATUS", ""),
               "github_checks_detail": g("GITHUB_CHECKS_DETAIL", ""),
@@ -549,49 +421,93 @@ jobs:
               "codeql_scan_result": g("CODEQL_SCAN_RESULT", ""),
               "gitleaks_scan_result": g("GITLEAKS_SCAN_RESULT", ""),
               "security_scan_result": g("SECURITY_SCAN_RESULT", ""),
-              "deployment_status": g("DSTATUS", "failure"),
-              "deployment_message": g("DMSG", ""),
-              "deployment_environment": "production",
-              "deployment_pipeline_url": run_url,
-              "deployment_run_id": run_id,
-              "deployment_timestamp": now,
+              "pipeline_run_id": run_id,
+              "pipeline_url": run_url,
               "artifact_url": run_url,
               "github_callback_attempts": 1,
-              "deployment_callback_attempts": 1,
-              "approval_notes": "Deployment completed from GitHub Actions after PR merge.",
-              "terraform_plan_summary": " ".join(g("PLAN_SUMMARY", "").split()) or "Terraform plan was not generated.",
-              "callback_source": "github_actions_terraform_deploy_after_merge",
-              "aws_region": g("AWS_REGION", "")
+              "environment": "production",
+              "priority": "medium",
+              "risk": "medium",
+              "impact": "medium",
+              "justification": "Production-bound Terraform module change submitted for CCoE approval in ServiceNow.",
+              "implementation_plan": "Merge to main after SNOW approval triggers OIDC-authenticated Terraform apply.",
+              "impact_summary": "Production-bound Terraform module change submitted for CCoE approval in ServiceNow.",
+              "rollback_plan": "If rejected, do not merge. If deployed and rollback is required, revert the PR or apply the previous known-good Terraform module version.",
+              "planned_start_date": now,
+              "planned_end_date": end,
+              "triggered_at": now
           }
 
           print(json.dumps(payload, indent=2))
           PY
 
-          echo "Deployment result payload:"
-          cat deployment-result.json
+          cat snow-payload.json
 
-          CURL_ARGS=(
-            --fail-with-body
-            --silent
-            --show-error
-            --http1.1
-            --tlsv1.2
-            --connect-timeout 20
-            --max-time 90
-            --retry 2
-            --retry-delay 2
-            --request POST
-            --header "Authorization: Bearer ${BEARER}"
-            --header "Content-Type: application/json"
-            --header "Accept: application/json"
-            --header "X-GitHub-SNOW-Shared-Secret: ${SN_GITHUB_SHARED_SECRET}"
-            --data @deployment-result.json
-          )
+      - name: Send enriched approval payload to ServiceNow
+        shell: bash
+        env:
+          SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
+          SN_API_PATH: ${{ secrets.SN_API_PATH }}
+          SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
+          BEARER: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
 
-          if [ -n "${SSL_CERT_FILE:-}" ] && [ -f "${SSL_CERT_FILE}" ]; then
-            CURL_ARGS+=(--cacert "${SSL_CERT_FILE}")
+          if [ -z "${SN_INSTANCE_URL:-}" ]; then
+            echo "Missing required GitHub secret: SN_INSTANCE_URL"
+            exit 1
           fi
 
-          curl "${CURL_ARGS[@]}" "${CALLBACK_URL}"
+          if [ -z "${SN_API_PATH:-}" ]; then
+            echo "Missing required GitHub secret: SN_API_PATH"
+            exit 1
+          fi
 
-          echo "ServiceNow deployment callback succeeded."
+          if [ -z "${BEARER:-}" ]; then
+            echo "Missing OAuth bearer token from previous step."
+            exit 1
+          fi
+
+          if [ -z "${SN_GITHUB_SHARED_SECRET:-}" ]; then
+            echo "Missing required GitHub secret: SN_GITHUB_SHARED_SECRET"
+            exit 1
+          fi
+
+          # Build URL safely: if SN_API_PATH is already a full https:// URL use it
+          # directly, otherwise join instance URL + path with exactly one slash.
+          SN_INSTANCE_URL="$(printf '%s' "${SN_INSTANCE_URL}" | tr -d '\r\n' | sed 's|/$||')"
+          SN_API_PATH="$(printf '%s' "${SN_API_PATH}" | tr -d '\r\n')"
+
+          if [[ "${SN_API_PATH}" == https://* ]]; then
+            URL="${SN_API_PATH}"
+          else
+            URL="${SN_INSTANCE_URL}/${SN_API_PATH#/}"
+          fi
+
+          if [[ "${URL}" != https://* ]]; then
+            echo "ERROR: Resolved ServiceNow URL does not start with https://: ${URL}"
+            exit 1
+          fi
+
+          echo "Posting approval payload to: ${URL}"
+
+          if [ -n "${SSL_CERT_FILE:-}" ] && [ -f "${SSL_CERT_FILE}" ]; then
+            CACERT_ARG="--cacert ${SSL_CERT_FILE}"
+          else
+            CACERT_ARG=""
+          fi
+
+          # shellcheck disable=SC2086
+          curl --fail-with-body -sS \
+            --http1.1 \
+            --tlsv1.2 \
+            --connect-timeout 20 \
+            --max-time 120 \
+            --request POST \
+            --url "${URL}" \
+            --header "Authorization: Bearer ${BEARER}" \
+            --header "Content-Type: application/json" \
+            --header "Accept: application/json" \
+            --header "X-GitHub-SNOW-Shared-Secret: ${SN_GITHUB_SHARED_SECRET}" \
+            $CACERT_ARG \
+            --data @snow-payload.json

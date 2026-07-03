@@ -30,3 +30,8 @@ jobs:
             -f state=pending \
             -f context="snow-approval" \
             -f description="Pending: ServiceNow approval required"
+
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${SHA}" \
+            -f state=pending \
+            -f context="snow-deployment-gate" \
+            -f description="Pending: Awaiting ServiceNow Change Request approval"

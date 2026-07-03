@@ -1,0 +1,68 @@
+name: terraform-checks
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  terraform-checks:
+    name: terraform-checks (${{ matrix.environment.name }})
+    runs-on: [self-hosted, linux, x64, snow-github]
+
+    strategy:
+      fail-fast: false
+      matrix:
+        environment:
+          - name: dev
+            path: terraform/environments/dev
+          - name: prod
+            path: terraform/environments/prod
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ matrix.environment.path }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Configure CA bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+            CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
+          elif [ -f /etc/pki/tls/certs/ca-bundle.crt ]; then
+            CA_BUNDLE="/etc/pki/tls/certs/ca-bundle.crt"
+          else
+            echo "No trusted CA bundle found on the runner."
+            exit 1
+          fi
+
+          echo "SSL_CERT_FILE=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "CURL_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "NODE_EXTRA_CA_CERTS=${CA_BUNDLE}" >> "$GITHUB_ENV"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.5
+          terraform_wrapper: false
+
+      - name: Terraform format check
+        run: terraform fmt -check -diff -recursive
+
+      - name: Terraform init without backend
+        run: terraform init -backend=false -input=false
+
+      - name: Terraform validate
+        run: terraform validate -no-color

@@ -1,0 +1,70 @@
+name: gitleaks
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: [self-hosted, linux, x64, snow-github]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Configure CA bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+            CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
+          elif [ -f /etc/pki/tls/certs/ca-bundle.crt ]; then
+            CA_BUNDLE="/etc/pki/tls/certs/ca-bundle.crt"
+          else
+            echo "No trusted CA bundle found on the runner."
+            exit 1
+          fi
+
+          echo "CURL_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
+
+      - name: Install Gitleaks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="8.21.2"
+          INSTALL_DIR="${RUNNER_TEMP}/gitleaks"
+
+          rm -rf "${INSTALL_DIR}"
+          mkdir -p "${INSTALL_DIR}"
+
+          curl --fail --location --silent --show-error \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" \
+            --output "${INSTALL_DIR}/gitleaks.tar.gz"
+
+          tar -xzf "${INSTALL_DIR}/gitleaks.tar.gz" -C "${INSTALL_DIR}"
+
+          chmod +x "${INSTALL_DIR}/gitleaks"
+
+          echo "GITLEAKS_BIN=${INSTALL_DIR}/gitleaks" >> "$GITHUB_ENV"
+
+      - name: Run Gitleaks secret scan
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          "${GITLEAKS_BIN}" detect \
+            --source . \
+            --no-banner \
+            --redact
