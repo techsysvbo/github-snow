@@ -357,6 +357,7 @@ jobs:
           CODEQL_SCAN_RESULT: ${{ steps.github_data.outputs.codeql_scan_result }}
           GITLEAKS_SCAN_RESULT: ${{ steps.github_data.outputs.gitleaks_scan_result }}
           SECURITY_SCAN_RESULT: ${{ steps.github_data.outputs.security_scan_result }}
+          SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
         run: |
           set -euo pipefail
 
@@ -383,6 +384,7 @@ jobs:
               review_body = f"PR approved in GitHub by {g('APPROVER', '')}."
 
           payload = {
+              "shared_secret": g("SN_GITHUB_SHARED_SECRET", ""),
               "event_type": "pull_request_ready_for_snow_approval",
               "owner": owner,
               "repo": repo,
@@ -466,6 +468,11 @@ jobs:
             exit 1
           fi
 
+          if [ -z "${SN_GITHUB_SHARED_SECRET:-}" ]; then
+            echo "Missing required GitHub secret: SN_GITHUB_SHARED_SECRET"
+            exit 1
+          fi
+
           # Build URL safely: if SN_API_PATH is already a full https:// URL use it
           # directly, otherwise join instance URL + path with exactly one slash.
           SN_INSTANCE_URL="$(printf '%s' "${SN_INSTANCE_URL}" | tr -d '\r\n' | sed 's|/$||')"
@@ -501,5 +508,6 @@ jobs:
             --header "Authorization: Bearer ${BEARER}" \
             --header "Content-Type: application/json" \
             --header "Accept: application/json" \
+            --header "X-GitHub-SNOW-Shared-Secret: ${SN_GITHUB_SHARED_SECRET}" \
             $CACERT_ARG \
             --data @snow-payload.json
