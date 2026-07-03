@@ -446,6 +446,7 @@ jobs:
         env:
           SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
           SN_API_PATH: ${{ secrets.SN_API_PATH }}
+          SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
           BEARER: ${{ steps.token.outputs.token }}
         run: |
           set -euo pipefail
