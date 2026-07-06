@@ -3,12 +3,13 @@
 # lifecycle policy, and access logging are intentionally out of scope
 # for this controlled demo stack.
 
-#checkov:skip=CKV2_AWS_62:Temporary demo bucket; S3 event notifications are out of scope for this test.
-#checkov:skip=CKV_AWS_145:Temporary demo uses AWS-managed SSE-S3 encryption and does not create a customer-managed KMS key.
-#checkov:skip=CKV2_AWS_61:Temporary demo bucket; lifecycle configuration is out of scope for this test.
-#checkov:skip=CKV_AWS_144:Temporary demo bucket; cross-region replication is out of scope for this test.
-#checkov:skip=CKV_AWS_18:Temporary demo bucket; access logging is out of scope for this test.
 resource "aws_s3_bucket" "demo" {
+  #checkov:skip=CKV2_AWS_62:Temporary demo bucket; event notifications are out of scope.
+  #checkov:skip=CKV_AWS_145:Temporary demo uses AWS-managed SSE-S3 encryption; no customer-managed KMS key is created.
+  #checkov:skip=CKV2_AWS_61:Temporary demo bucket; lifecycle configuration is out of scope.
+  #checkov:skip=CKV_AWS_144:Temporary demo bucket; cross-region replication is out of scope.
+  #checkov:skip=CKV_AWS_18:Temporary demo bucket; access logging is out of scope.
+
   bucket = var.bucket_name
 }
 
