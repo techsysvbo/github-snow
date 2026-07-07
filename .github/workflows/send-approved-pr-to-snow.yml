@@ -318,34 +318,34 @@ jobs:
           ACCESS_TOKEN="$(python3 - "${TOKEN_FILE}" <<'PY'
           import json
           import sys
-            from urllib.parse import parse_qs
+          from urllib.parse import parse_qs
           from pathlib import Path
 
-            raw = Path(sys.argv[1]).read_text().strip()
-            if not raw:
+          raw = Path(sys.argv[1]).read_text().strip()
+          if not raw:
               print("OAuth response body was empty despite HTTP success.", file=sys.stderr)
               sys.exit(1)
 
-            token = None
+          token = None
 
-            try:
+          try:
               data = json.loads(raw)
-            except json.JSONDecodeError:
+          except json.JSONDecodeError:
               parsed = parse_qs(raw, keep_blank_values=True)
               token_values = parsed.get("access_token", [])
               if token_values and token_values[0]:
-                token = token_values[0]
+                  token = token_values[0]
               else:
-                snippet = raw[:500].replace("\n", " ")
-                print(f"OAuth response was not JSON and did not contain access_token form data. Body starts with: {snippet}", file=sys.stderr)
-                sys.exit(1)
-            else:
+                  snippet = raw[:500].replace("\n", " ")
+                  print(f"OAuth response was not JSON and did not contain access_token form data. Body starts with: {snippet}", file=sys.stderr)
+                  sys.exit(1)
+          else:
               token = data.get("access_token")
               if not token:
-                print("No access_token in JSON response. Keys: " + ", ".join(data.keys()), file=sys.stderr)
-                sys.exit(1)
+                  print("No access_token in JSON response. Keys: " + ", ".join(data.keys()), file=sys.stderr)
+                  sys.exit(1)
 
-            print(token)
+          print(token)
           PY
           )"
 
