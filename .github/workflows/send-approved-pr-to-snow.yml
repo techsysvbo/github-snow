@@ -318,14 +318,34 @@ jobs:
           ACCESS_TOKEN="$(python3 - "${TOKEN_FILE}" <<'PY'
           import json
           import sys
+            from urllib.parse import parse_qs
           from pathlib import Path
 
-          data = json.loads(Path(sys.argv[1]).read_text())
-          token = data.get("access_token")
-          if not token:
-              print("No access_token in response. Keys: " + ", ".join(data.keys()), file=sys.stderr)
+            raw = Path(sys.argv[1]).read_text().strip()
+            if not raw:
+              print("OAuth response body was empty despite HTTP success.", file=sys.stderr)
               sys.exit(1)
-          print(token)
+
+            token = None
+
+            try:
+              data = json.loads(raw)
+            except json.JSONDecodeError:
+              parsed = parse_qs(raw, keep_blank_values=True)
+              token_values = parsed.get("access_token", [])
+              if token_values and token_values[0]:
+                token = token_values[0]
+              else:
+                snippet = raw[:500].replace("\n", " ")
+                print(f"OAuth response was not JSON and did not contain access_token form data. Body starts with: {snippet}", file=sys.stderr)
+                sys.exit(1)
+            else:
+              token = data.get("access_token")
+              if not token:
+                print("No access_token in JSON response. Keys: " + ", ".join(data.keys()), file=sys.stderr)
+                sys.exit(1)
+
+            print(token)
           PY
           )"
 
@@ -357,7 +377,6 @@ jobs:
           CODEQL_SCAN_RESULT: ${{ steps.github_data.outputs.codeql_scan_result }}
           GITLEAKS_SCAN_RESULT: ${{ steps.github_data.outputs.gitleaks_scan_result }}
           SECURITY_SCAN_RESULT: ${{ steps.github_data.outputs.security_scan_result }}
-          SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
         run: |
           set -euo pipefail
 
@@ -384,7 +403,6 @@ jobs:
               review_body = f"PR approved in GitHub by {g('APPROVER', '')}."
 
           payload = {
-              "shared_secret": g("SN_GITHUB_SHARED_SECRET", ""),
               "event_type": "pull_request_ready_for_snow_approval",
               "owner": owner,
               "repo": repo,
@@ -468,11 +486,6 @@ jobs:
             exit 1
           fi
 
-          if [ -z "${SN_GITHUB_SHARED_SECRET:-}" ]; then
-            echo "Missing required GitHub secret: SN_GITHUB_SHARED_SECRET"
-            exit 1
-          fi
-
           # Build URL safely: if SN_API_PATH is already a full https:// URL use it
           # directly, otherwise join instance URL + path with exactly one slash.
           SN_INSTANCE_URL="$(printf '%s' "${SN_INSTANCE_URL}" | tr -d '\r\n' | sed 's|/$||')"
@@ -508,6 +521,5 @@ jobs:
             --header "Authorization: Bearer ${BEARER}" \
             --header "Content-Type: application/json" \
             --header "Accept: application/json" \
-            --header "X-GitHub-SNOW-Shared-Secret: ${SN_GITHUB_SHARED_SECRET}" \
             $CACERT_ARG \
             --data @snow-payload.json
