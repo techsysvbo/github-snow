@@ -24,6 +24,7 @@ jobs:
     environment: production
 
     env:
+      SN_GATE_STATUS_API_PATH: ${{ secrets.SN_GATE_STATUS_API_PATH }}
       AWS_REGION: ${{ secrets.AWS_REGION }}
       TF_ENV_PATH: terraform/environments/prod-s3-demo
       TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
@@ -282,6 +283,157 @@ jobs:
           echo "AWS_REGION=${AWS_REGION}"
           echo "TF_STATE_BUCKET=${TF_STATE_BUCKET}"
           echo "TF_LOCK_TABLE=${TF_LOCK_TABLE}"
+
+      - name: Get ServiceNow OAuth token for gate check
+        id: snow_gate_token
+        shell: bash
+        env:
+          SN_OAUTH_TOKEN_URL: ${{ secrets.SN_OAUTH_TOKEN_URL }}
+          SN_OAUTH_CLIENT_ID: ${{ secrets.SN_OAUTH_CLIENT_ID }}
+          SN_OAUTH_CLIENT_SECRET: ${{ secrets.SN_OAUTH_CLIENT_SECRET }}
+          SN_OAUTH_USERNAME: ${{ secrets.SN_OAUTH_USERNAME }}
+          SN_OAUTH_PASSWORD: ${{ secrets.SN_OAUTH_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          for item in SN_OAUTH_TOKEN_URL SN_OAUTH_CLIENT_ID SN_OAUTH_CLIENT_SECRET SN_OAUTH_USERNAME SN_OAUTH_PASSWORD; do
+            if [ -z "${!item:-}" ]; then
+              echo "Missing required value: ${item}"
+              exit 1
+            fi
+          done
+
+          TOKEN_FILE="$(mktemp)"
+          trap 'rm -f "${TOKEN_FILE}"' EXIT
+
+          HTTP_STATUS="$(curl --silent --show-error --fail-with-body \
+            --output "${TOKEN_FILE}" \
+            --write-out "%{http_code}" \
+            --request POST \
+            --url "${SN_OAUTH_TOKEN_URL}" \
+            --header "Content-Type: application/x-www-form-urlencoded" \
+            --header "Accept: application/json" \
+            --data-urlencode "grant_type=client_credentials" \
+            --data-urlencode "client_id=${SN_OAUTH_CLIENT_ID}" \
+            --data-urlencode "client_secret=${SN_OAUTH_CLIENT_SECRET}" \
+            --data-urlencode "username=${SN_OAUTH_USERNAME}" \
+            --data-urlencode "password=${SN_OAUTH_PASSWORD}")"
+
+          if [[ ! "${HTTP_STATUS}" =~ ^2[0-9][0-9]$ ]]; then
+            echo "Failed to get SNOW token for gate check. HTTP: ${HTTP_STATUS}"
+            tr -d '\r' < "${TOKEN_FILE}" | head -c 1200 || true
+            echo
+            exit 1
+          fi
+
+          ACCESS_TOKEN="$(python3 - "${TOKEN_FILE}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          data = json.loads(Path(sys.argv[1]).read_text())
+          token = data.get("access_token")
+          if not token:
+              print("No access_token in token response", file=sys.stderr)
+              sys.exit(1)
+          print(token)
+          PY
+          )"
+
+          echo "::add-mask::${ACCESS_TOKEN}"
+          echo "token=${ACCESS_TOKEN}" >> "$GITHUB_OUTPUT"
+
+      - name: Enforce ServiceNow deployment gate
+        shell: bash
+        env:
+          PR_NUMBER: ${{ steps.pr_meta.outputs.pr_number }}
+          SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
+          SN_GATE_STATUS_API_PATH: ${{ secrets.SN_GATE_STATUS_API_PATH }}
+          BEARER: ${{ steps.snow_gate_token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${PR_NUMBER:-}" ]; then
+            echo "Deployment blocked: PR number is missing. Open a new PR and restart approval flow."
+            exit 1
+          fi
+
+          if [ -z "${SN_GATE_STATUS_API_PATH:-}" ]; then
+            echo "Missing required secret: SN_GATE_STATUS_API_PATH"
+            exit 1
+          fi
+
+          if [ -z "${BEARER:-}" ]; then
+            echo "Missing OAuth bearer token for SNOW gate check."
+            exit 1
+          fi
+
+          # Build URL: full URL is allowed, or instance + path.
+          SN_INSTANCE_URL="$(printf '%s' "${SN_INSTANCE_URL:-}" | tr -d '\r\n' | sed 's|/$||')"
+          PATH_OR_URL="$(printf '%s' "${SN_GATE_STATUS_API_PATH}" | tr -d '\r\n')"
+          PATH_OR_URL="${PATH_OR_URL//\{pr_number\}/${PR_NUMBER}}"
+
+          if [[ "${PATH_OR_URL}" == https://* ]]; then
+            URL="${PATH_OR_URL}"
+          else
+            URL="${SN_INSTANCE_URL}/${PATH_OR_URL#/}"
+          fi
+
+          RESP_FILE="$(mktemp)"
+          trap 'rm -f "${RESP_FILE}"' EXIT
+
+          HTTP_STATUS="$(curl --silent --show-error --fail-with-body \
+            --output "${RESP_FILE}" \
+            --write-out "%{http_code}" \
+            --request GET \
+            --url "${URL}" \
+            --header "Authorization: Bearer ${BEARER}" \
+            --header "Accept: application/json")"
+
+          if [[ ! "${HTTP_STATUS}" =~ ^2[0-9][0-9]$ ]]; then
+            echo "SNOW gate lookup failed. HTTP: ${HTTP_STATUS}"
+            tr -d '\r' < "${RESP_FILE}" | head -c 1200 || true
+            echo
+            exit 1
+          fi
+
+          GATE_STATE="$(python3 - "${RESP_FILE}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          data = json.loads(Path(sys.argv[1]).read_text())
+
+          # Accept multiple response shapes
+          state = (
+              data.get("result", {}).get("deployment_state")
+              or data.get("result", {}).get("state")
+              or data.get("result", {}).get("status")
+              or data.get("deployment_state")
+              or data.get("state")
+              or data.get("status")
+              or ""
+          )
+
+          print(str(state).strip().lower())
+          PY
+          )"
+
+          echo "SNOW gate state: ${GATE_STATE}"
+
+          case "${GATE_STATE}" in
+            approved|implement|authorized|ready)
+              echo "SNOW gate open. Deployment allowed."
+              ;;
+            failed|closed|cancelled|canceled|rejected)
+              echo "Deployment blocked: SNOW record is ${GATE_STATE}. Open a new PR and restart flow."
+              exit 1
+              ;;
+            *)
+              echo "Deployment blocked: unknown SNOW gate state '${GATE_STATE}'."
+              exit 1
+              ;;
+          esac
 
       - name: Configure AWS credentials using GitHub OIDC
         uses: aws-actions/configure-aws-credentials@v5
