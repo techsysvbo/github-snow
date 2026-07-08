@@ -306,18 +306,72 @@ jobs:
           TOKEN_FILE="$(mktemp)"
           trap 'rm -f "${TOKEN_FILE}"' EXIT
 
-          HTTP_STATUS="$(curl --silent --show-error --fail-with-body \
-            --output "${TOKEN_FILE}" \
-            --write-out "%{http_code}" \
-            --request POST \
-            --url "${SN_OAUTH_TOKEN_URL}" \
-            --header "Content-Type: application/x-www-form-urlencoded" \
-            --header "Accept: application/json" \
-            --data-urlencode "grant_type=client_credentials" \
-            --data-urlencode "client_id=${SN_OAUTH_CLIENT_ID}" \
-            --data-urlencode "client_secret=${SN_OAUTH_CLIENT_SECRET}" \
-            --data-urlencode "username=${SN_OAUTH_USERNAME}" \
-            --data-urlencode "password=${SN_OAUTH_PASSWORD}")"
+          SN_OAUTH_TOKEN_URL="$(printf '%s' "${SN_OAUTH_TOKEN_URL}" | tr -d '\r\n')"
+          SN_OAUTH_CLIENT_ID="$(printf '%s' "${SN_OAUTH_CLIENT_ID}" | tr -d '\r\n')"
+          SN_OAUTH_CLIENT_SECRET="$(printf '%s' "${SN_OAUTH_CLIENT_SECRET}" | tr -d '\r\n')"
+          SN_OAUTH_USERNAME="$(printf '%s' "${SN_OAUTH_USERNAME}" | tr -d '\r\n')"
+          SN_OAUTH_PASSWORD="$(printf '%s' "${SN_OAUTH_PASSWORD}" | tr -d '\r\n')"
+
+          request_token() {
+            local grant="$1"
+            local out_file="$2"
+
+            local args=(
+              --silent
+              --show-error
+              --fail-with-body
+              --http1.1
+              --tlsv1.2
+              --connect-timeout 20
+              --max-time 90
+              --retry 2
+              --retry-delay 2
+              --output "${out_file}"
+              --write-out "%{http_code}"
+              --request POST
+              --url "${SN_OAUTH_TOKEN_URL}"
+              --header "Content-Type: application/x-www-form-urlencoded"
+              --header "Accept: application/json"
+              --data-urlencode "grant_type=${grant}"
+              --data-urlencode "client_id=${SN_OAUTH_CLIENT_ID}"
+              --data-urlencode "client_secret=${SN_OAUTH_CLIENT_SECRET}"
+              --data-urlencode "username=${SN_OAUTH_USERNAME}"
+              --data-urlencode "password=${SN_OAUTH_PASSWORD}"
+            )
+
+            if [ -n "${SSL_CERT_FILE:-}" ] && [ -f "${SSL_CERT_FILE}" ]; then
+              args+=(--cacert "${SSL_CERT_FILE}")
+            fi
+
+            local http_status curl_exit
+            set +e
+            http_status="$(curl "${args[@]}")"
+            curl_exit=$?
+            set -e
+            printf '%s:%s' "${curl_exit}" "${http_status}"
+          }
+
+          # Try client_credentials first, then fallback to password if denied.
+          result="$(request_token "client_credentials" "${TOKEN_FILE}")"
+          CURL_EXIT="${result%%:*}"
+          HTTP_STATUS="${result##*:}"
+          USED_GRANT="client_credentials"
+
+          echo "ServiceNow OAuth HTTP status: ${HTTP_STATUS:-no-response} (grant: ${USED_GRANT})"
+
+          if [ "${CURL_EXIT}" -eq 22 ] || [ "${HTTP_STATUS}" = "401" ] || [ "${HTTP_STATUS}" = "403" ]; then
+            echo "client_credentials denied. Retrying with password grant."
+            result="$(request_token "password" "${TOKEN_FILE}")"
+            CURL_EXIT="${result%%:*}"
+            HTTP_STATUS="${result##*:}"
+            USED_GRANT="password"
+            echo "ServiceNow OAuth HTTP status: ${HTTP_STATUS:-no-response} (grant: ${USED_GRANT})"
+          fi
+
+          if [ "${CURL_EXIT}" -ne 0 ] && [ "${CURL_EXIT}" -ne 22 ]; then
+            echo "SNOW OAuth connection failed before response body could be processed. curl exit: ${CURL_EXIT}"
+            exit "${CURL_EXIT}"
+          fi
 
           if [[ ! "${HTTP_STATUS}" =~ ^2[0-9][0-9]$ ]]; then
             echo "Failed to get SNOW token for gate check. HTTP: ${HTTP_STATUS}"
@@ -382,6 +436,9 @@ jobs:
           RESP_FILE="$(mktemp)"
           trap 'rm -f "${RESP_FILE}"' EXIT
 
+          CURL_EXIT=0
+          set +e
+
           HTTP_STATUS="$(curl --silent --show-error --fail-with-body \
             --output "${RESP_FILE}" \
             --write-out "%{http_code}" \
@@ -389,6 +446,13 @@ jobs:
             --url "${URL}" \
             --header "Authorization: Bearer ${BEARER}" \
             --header "Accept: application/json")"
+          CURL_EXIT=$?
+          set -e
+
+          if [ "${CURL_EXIT}" -ne 0 ] && [ "${CURL_EXIT}" -ne 22 ]; then
+            echo "SNOW gate lookup failed before response body could be processed. curl exit: ${CURL_EXIT}"
+            exit "${CURL_EXIT}"
+          fi
 
           if [[ ! "${HTTP_STATUS}" =~ ^2[0-9][0-9]$ ]]; then
             echo "SNOW gate lookup failed. HTTP: ${HTTP_STATUS}"
