@@ -306,6 +306,8 @@ jobs:
           TOKEN_FILE="$(mktemp)"
           trap 'rm -f "${TOKEN_FILE}"' EXIT
 
+          CURL_EXIT=0
+          set +e
           HTTP_STATUS="$(curl --silent --show-error --fail-with-body \
             --output "${TOKEN_FILE}" \
             --write-out "%{http_code}" \
@@ -318,6 +320,13 @@ jobs:
             --data-urlencode "client_secret=${SN_OAUTH_CLIENT_SECRET}" \
             --data-urlencode "username=${SN_OAUTH_USERNAME}" \
             --data-urlencode "password=${SN_OAUTH_PASSWORD}")"
+          CURL_EXIT=$?
+          set -e
+
+          if [ "${CURL_EXIT}" -ne 0 ] && [ "${CURL_EXIT}" -ne 22 ]; then
+            echo "SNOW OAuth connection failed before response body could be processed. curl exit: ${CURL_EXIT}"
+            exit "${CURL_EXIT}"
+          fi
 
           if [[ ! "${HTTP_STATUS}" =~ ^2[0-9][0-9]$ ]]; then
             echo "Failed to get SNOW token for gate check. HTTP: ${HTTP_STATUS}"
