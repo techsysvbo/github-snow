@@ -12,6 +12,7 @@ permissions:
   pull-requests: read
   actions: read
   checks: read
+  statuses: read
 
 concurrency:
   group: tf-deploy-${{ github.ref }}
@@ -24,7 +25,6 @@ jobs:
     environment: production
 
     env:
-      SN_GATE_STATUS_API_PATH: ${{ secrets.SN_GATE_STATUS_API_PATH }}
       AWS_REGION: ${{ secrets.AWS_REGION }}
       TF_ENV_PATH: terraform/environments/prod-s3-demo
       TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
@@ -284,126 +284,12 @@ jobs:
           echo "TF_STATE_BUCKET=${TF_STATE_BUCKET}"
           echo "TF_LOCK_TABLE=${TF_LOCK_TABLE}"
 
-      - name: Get ServiceNow OAuth token for gate check
-        id: snow_gate_token
-        shell: bash
-        env:
-          SN_OAUTH_TOKEN_URL: ${{ secrets.SN_OAUTH_TOKEN_URL }}
-          SN_OAUTH_CLIENT_ID: ${{ secrets.SN_OAUTH_CLIENT_ID }}
-          SN_OAUTH_CLIENT_SECRET: ${{ secrets.SN_OAUTH_CLIENT_SECRET }}
-          SN_OAUTH_USERNAME: ${{ secrets.SN_OAUTH_USERNAME }}
-          SN_OAUTH_PASSWORD: ${{ secrets.SN_OAUTH_PASSWORD }}
-        run: |
-          set -euo pipefail
-
-          for item in SN_OAUTH_TOKEN_URL SN_OAUTH_CLIENT_ID SN_OAUTH_CLIENT_SECRET SN_OAUTH_USERNAME SN_OAUTH_PASSWORD; do
-            if [ -z "${!item:-}" ]; then
-              echo "Missing required value: ${item}"
-              exit 1
-            fi
-          done
-
-          TOKEN_FILE="$(mktemp)"
-          trap 'rm -f "${TOKEN_FILE}"' EXIT
-
-          SN_OAUTH_TOKEN_URL="$(printf '%s' "${SN_OAUTH_TOKEN_URL}" | tr -d '\r\n')"
-          SN_OAUTH_CLIENT_ID="$(printf '%s' "${SN_OAUTH_CLIENT_ID}" | tr -d '\r\n')"
-          SN_OAUTH_CLIENT_SECRET="$(printf '%s' "${SN_OAUTH_CLIENT_SECRET}" | tr -d '\r\n')"
-          SN_OAUTH_USERNAME="$(printf '%s' "${SN_OAUTH_USERNAME}" | tr -d '\r\n')"
-          SN_OAUTH_PASSWORD="$(printf '%s' "${SN_OAUTH_PASSWORD}" | tr -d '\r\n')"
-
-          request_token() {
-            local grant="$1"
-            local out_file="$2"
-
-            local args=(
-              --silent
-              --show-error
-              --fail-with-body
-              --http1.1
-              --tlsv1.2
-              --connect-timeout 20
-              --max-time 90
-              --retry 2
-              --retry-delay 2
-              --output "${out_file}"
-              --write-out "%{http_code}"
-              --request POST
-              --url "${SN_OAUTH_TOKEN_URL}"
-              --header "Content-Type: application/x-www-form-urlencoded"
-              --header "Accept: application/json"
-              --data-urlencode "grant_type=${grant}"
-              --data-urlencode "client_id=${SN_OAUTH_CLIENT_ID}"
-              --data-urlencode "client_secret=${SN_OAUTH_CLIENT_SECRET}"
-              --data-urlencode "username=${SN_OAUTH_USERNAME}"
-              --data-urlencode "password=${SN_OAUTH_PASSWORD}"
-            )
-
-            if [ -n "${SSL_CERT_FILE:-}" ] && [ -f "${SSL_CERT_FILE}" ]; then
-              args+=(--cacert "${SSL_CERT_FILE}")
-            fi
-
-            local http_status curl_exit
-            set +e
-            http_status="$(curl "${args[@]}")"
-            curl_exit=$?
-            set -e
-            printf '%s:%s' "${curl_exit}" "${http_status}"
-          }
-
-          # Try client_credentials first, then fallback to password if denied.
-          result="$(request_token "client_credentials" "${TOKEN_FILE}")"
-          CURL_EXIT="${result%%:*}"
-          HTTP_STATUS="${result##*:}"
-          USED_GRANT="client_credentials"
-
-          echo "ServiceNow OAuth HTTP status: ${HTTP_STATUS:-no-response} (grant: ${USED_GRANT})"
-
-          if [ "${CURL_EXIT}" -eq 22 ] || [ "${HTTP_STATUS}" = "401" ] || [ "${HTTP_STATUS}" = "403" ]; then
-            echo "client_credentials denied. Retrying with password grant."
-            result="$(request_token "password" "${TOKEN_FILE}")"
-            CURL_EXIT="${result%%:*}"
-            HTTP_STATUS="${result##*:}"
-            USED_GRANT="password"
-            echo "ServiceNow OAuth HTTP status: ${HTTP_STATUS:-no-response} (grant: ${USED_GRANT})"
-          fi
-
-          if [ "${CURL_EXIT}" -ne 0 ] && [ "${CURL_EXIT}" -ne 22 ]; then
-            echo "SNOW OAuth connection failed before response body could be processed. curl exit: ${CURL_EXIT}"
-            exit "${CURL_EXIT}"
-          fi
-
-          if [[ ! "${HTTP_STATUS}" =~ ^2[0-9][0-9]$ ]]; then
-            echo "Failed to get SNOW token for gate check. HTTP: ${HTTP_STATUS}"
-            tr -d '\r' < "${TOKEN_FILE}" | head -c 1200 || true
-            echo
-            exit 1
-          fi
-
-          ACCESS_TOKEN="$(python3 - "${TOKEN_FILE}" <<'PY'
-          import json
-          import sys
-          from pathlib import Path
-
-          data = json.loads(Path(sys.argv[1]).read_text())
-          token = data.get("access_token")
-          if not token:
-              print("No access_token in token response", file=sys.stderr)
-              sys.exit(1)
-          print(token)
-          PY
-          )"
-
-          echo "::add-mask::${ACCESS_TOKEN}"
-          echo "token=${ACCESS_TOKEN}" >> "$GITHUB_OUTPUT"
-
       - name: Enforce ServiceNow deployment gate
         shell: bash
         env:
           PR_NUMBER: ${{ steps.pr_meta.outputs.pr_number }}
-          SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
-          SN_GATE_STATUS_API_PATH: ${{ secrets.SN_GATE_STATUS_API_PATH }}
-          BEARER: ${{ steps.snow_gate_token.outputs.token }}
+          PR_HEAD_SHA: ${{ steps.pr_meta.outputs.head_sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -412,89 +298,38 @@ jobs:
             exit 1
           fi
 
-          if [ -z "${SN_GATE_STATUS_API_PATH:-}" ]; then
-            echo "Missing required secret: SN_GATE_STATUS_API_PATH"
+          if [ -z "${PR_HEAD_SHA:-}" ]; then
+            echo "Deployment blocked: PR head SHA is missing. Cannot verify deployment gate."
             exit 1
           fi
 
-          if [ -z "${BEARER:-}" ]; then
-            echo "Missing OAuth bearer token for SNOW gate check."
-            exit 1
-          fi
+          # Check the snow-deployment-gate commit status set by ServiceNow on the PR head SHA
+          # after a Change Request is approved.
+          GATE_STATUS="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/statuses/${PR_HEAD_SHA}" \
+            --jq '[.[] | select(.context == "snow-deployment-gate")] | sort_by(.updated_at) | last | .state // "missing"')"
 
-          # Build URL: full URL is allowed, or instance + path.
-          SN_INSTANCE_URL="$(printf '%s' "${SN_INSTANCE_URL:-}" | tr -d '\r\n' | sed 's|/$||')"
-          PATH_OR_URL="$(printf '%s' "${SN_GATE_STATUS_API_PATH}" | tr -d '\r\n')"
-          PATH_OR_URL="${PATH_OR_URL//\{pr_number\}/${PR_NUMBER}}"
+          echo "ServiceNow deployment gate status: ${GATE_STATUS}"
 
-          if [[ "${PATH_OR_URL}" == https://* ]]; then
-            URL="${PATH_OR_URL}"
-          else
-            URL="${SN_INSTANCE_URL}/${PATH_OR_URL#/}"
-          fi
-
-          RESP_FILE="$(mktemp)"
-          trap 'rm -f "${RESP_FILE}"' EXIT
-
-          CURL_EXIT=0
-          set +e
-
-          HTTP_STATUS="$(curl --silent --show-error --fail-with-body \
-            --output "${RESP_FILE}" \
-            --write-out "%{http_code}" \
-            --request GET \
-            --url "${URL}" \
-            --header "Authorization: Bearer ${BEARER}" \
-            --header "Accept: application/json")"
-          CURL_EXIT=$?
-          set -e
-
-          if [ "${CURL_EXIT}" -ne 0 ] && [ "${CURL_EXIT}" -ne 22 ]; then
-            echo "SNOW gate lookup failed before response body could be processed. curl exit: ${CURL_EXIT}"
-            exit "${CURL_EXIT}"
-          fi
-
-          if [[ ! "${HTTP_STATUS}" =~ ^2[0-9][0-9]$ ]]; then
-            echo "SNOW gate lookup failed. HTTP: ${HTTP_STATUS}"
-            tr -d '\r' < "${RESP_FILE}" | head -c 1200 || true
-            echo
-            exit 1
-          fi
-
-          GATE_STATE="$(python3 - "${RESP_FILE}" <<'PY'
-          import json
-          import sys
-          from pathlib import Path
-
-          data = json.loads(Path(sys.argv[1]).read_text())
-
-          # Accept multiple response shapes
-          state = (
-              data.get("result", {}).get("deployment_state")
-              or data.get("result", {}).get("state")
-              or data.get("result", {}).get("status")
-              or data.get("deployment_state")
-              or data.get("state")
-              or data.get("status")
-              or ""
-          )
-
-          print(str(state).strip().lower())
-          PY
-          )"
-
-          echo "SNOW gate state: ${GATE_STATE}"
-
-          case "${GATE_STATE}" in
-            approved|implement|authorized|ready)
+          case "${GATE_STATUS}" in
+            success)
               echo "SNOW gate open. Deployment allowed."
               ;;
-            failed|closed|cancelled|canceled|rejected)
-              echo "Deployment blocked: SNOW record is ${GATE_STATE}. Open a new PR and restart flow."
+            pending)
+              echo "Deployment blocked: ServiceNow deployment gate is pending. Await Change Request approval."
+              exit 1
+              ;;
+            failure|error)
+              echo "Deployment blocked: ServiceNow deployment gate is ${GATE_STATUS}. Open a new PR and restart flow."
+              exit 1
+              ;;
+            missing|"")
+              echo "Deployment blocked: ServiceNow deployment gate status not found for this PR. Open a new PR and restart approval flow."
               exit 1
               ;;
             *)
-              echo "Deployment blocked: unknown SNOW gate state '${GATE_STATE}'."
+              echo "Deployment blocked: unknown ServiceNow deployment gate state '${GATE_STATUS}'."
               exit 1
               ;;
           esac
