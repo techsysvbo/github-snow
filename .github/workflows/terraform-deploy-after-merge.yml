@@ -308,7 +308,7 @@ jobs:
           GATE_STATUS="$(gh api \
             -H "Accept: application/vnd.github+json" \
             "repos/${GITHUB_REPOSITORY}/statuses/${PR_HEAD_SHA}" \
-            --jq '[.[] | select(.context == "snow-deployment-gate")] | sort_by(.updated_at) | last | .state // "missing"')"
+            --jq '[.[] | select(.context == "snow-deployment-gate")] | if length > 0 then sort_by(.updated_at) | last | .state else "missing" end')"
 
           echo "ServiceNow deployment gate status: ${GATE_STATUS}"
 
@@ -324,7 +324,7 @@ jobs:
               echo "Deployment blocked: ServiceNow deployment gate is ${GATE_STATUS}. Open a new PR and restart flow."
               exit 1
               ;;
-            missing|"")
+            missing)
               echo "Deployment blocked: ServiceNow deployment gate status not found for this PR. Open a new PR and restart approval flow."
               exit 1
               ;;
