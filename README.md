@@ -238,3 +238,5 @@ GitHub-ServiceNow-IaC-Approval
 Add it as GitHub secret:
 
 CMDB_CI_NAME
+
+Checkov workflow test - Wed Jul  8 21:01:11 -04 2026
