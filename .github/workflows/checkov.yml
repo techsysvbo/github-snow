@@ -61,4 +61,4 @@ jobs:
           "${CHECKOV_BIN}" \
             --directory terraform \
             --framework terraform \
-            --quiet
+            #--quiet
