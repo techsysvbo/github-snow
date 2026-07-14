@@ -234,9 +234,9 @@ jobs:
             fi
           done
 
-          SN_OAUTH_TOKEN_URL="$(printf '%s' "${SN_OAUTH_GOVCLOUD_TOKEN_URL}" | tr -d '\r\n')"
+          SN_OAUTH_TOKEN_URL="$(printf '%s' "${SN_OAUTH_TOKEN_URL}" | tr -d '\r\n')"
           SN_OAUTH_CLIENT_ID="$(printf '%s' "${SN_OAUTH_CLIENT_ID}" | tr -d '\r\n')"
-          SN_OAUTH_CLIENT_SECRET="$(printf '%s' "${SN_OAUTH_GOVCLOUD_CLIENT_SECRET}" | tr -d '\r\n')"
+          SN_OAUTH_CLIENT_SECRET="$(printf '%s' "${SN_OAUTH_CLIENT_SECRET}" | tr -d '\r\n')"
           SN_OAUTH_USERNAME="$(printf '%s' "${SN_OAUTH_USERNAME}" | tr -d '\r\n')"
           SN_OAUTH_PASSWORD="$(printf '%s' "${SN_OAUTH_PASSWORD}" | tr -d '\r\n')"
 
