@@ -219,9 +219,9 @@ jobs:
         id: token
         shell: bash
         env:
-          SN_OAUTH_TOKEN_URL: ${{ secrets.SN_OAUTH_TOKEN_URL }}
+          SN_OAUTH_TOKEN_URL: ${{ secrets.SN_OAUTH_GOVCLOUD_TOKEN_URL }}
           SN_OAUTH_CLIENT_ID: ${{ secrets.SN_OAUTH_CLIENT_ID }}
-          SN_OAUTH_CLIENT_SECRET: ${{ secrets.SN_OAUTH_CLIENT_SECRET }}
+          SN_OAUTH_CLIENT_SECRET: ${{ secrets.SN_OAUTH_GOVCLOUD_CLIENT_SECRET }}
           SN_OAUTH_USERNAME: ${{ secrets.SN_OAUTH_USERNAME }}
           SN_OAUTH_PASSWORD: ${{ secrets.SN_OAUTH_PASSWORD }}
         run: |
@@ -234,9 +234,9 @@ jobs:
             fi
           done
 
-          SN_OAUTH_TOKEN_URL="$(printf '%s' "${SN_OAUTH_TOKEN_URL}" | tr -d '\r\n')"
+          SN_OAUTH_TOKEN_URL="$(printf '%s' "${SN_OAUTH_GOVCLOUD_TOKEN_URL}" | tr -d '\r\n')"
           SN_OAUTH_CLIENT_ID="$(printf '%s' "${SN_OAUTH_CLIENT_ID}" | tr -d '\r\n')"
-          SN_OAUTH_CLIENT_SECRET="$(printf '%s' "${SN_OAUTH_CLIENT_SECRET}" | tr -d '\r\n')"
+          SN_OAUTH_CLIENT_SECRET="$(printf '%s' "${SN_OAUTH_GOVCLOUD_CLIENT_SECRET}" | tr -d '\r\n')"
           SN_OAUTH_USERNAME="$(printf '%s' "${SN_OAUTH_USERNAME}" | tr -d '\r\n')"
           SN_OAUTH_PASSWORD="$(printf '%s' "${SN_OAUTH_PASSWORD}" | tr -d '\r\n')"
 
@@ -446,7 +446,7 @@ jobs:
       - name: Send enriched approval payload to ServiceNow
         shell: bash
         env:
-          SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
+          SN_INSTANCE_URL: ${{ secrets.SN_GOVCLOUD_INSTANCE_URL }}
           SN_API_PATH: ${{ secrets.SN_API_PATH }}
           SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
           BEARER: ${{ steps.token.outputs.token }}
