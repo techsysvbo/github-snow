@@ -31,12 +31,12 @@ jobs:
       TF_VAR_bucket_name: ${{ vars.TF_S3_DEMO_BUCKET_NAME }}
       TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
       TF_LOCK_TABLE: ${{ vars.TF_LOCK_TABLE }}
-      SN_INSTANCE_URL: ${{ secrets.SN_INSTANCE_URL }}
+      SN_INSTANCE_URL: ${{ secrets.SN_GOVCLOUDINSTANCE_URL }}
       SN_DEPLOYMENT_CALLBACK_PATH: ${{ secrets.SN_DEPLOYMENT_CALLBACK_PATH }}
       SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
-      SN_OAUTH_TOKEN_URL: ${{ secrets.SN_OAUTH_TOKEN_URL }}
+      SN_OAUTH_TOKEN_URL: ${{ secrets.SN_GOVCLOUD_OAUTH_TOKEN_URL }}
       SN_OAUTH_CLIENT_ID: ${{ secrets.SN_OAUTH_CLIENT_ID }}
-      SN_OAUTH_CLIENT_SECRET: ${{ secrets.SN_OAUTH_CLIENT_SECRET }}
+      SN_OAUTH_CLIENT_SECRET: ${{ secrets.SN_OAUTH_GOVCLOUD_CLIENT_SECRET }}
       SN_OAUTH_USERNAME: ${{ secrets.SN_OAUTH_USERNAME }}
       SN_OAUTH_PASSWORD: ${{ secrets.SN_OAUTH_PASSWORD }}
 
@@ -400,7 +400,7 @@ jobs:
         if: always()
         shell: bash
         env:
-          SN_OAUTH_TOKEN_URL: ${{ secrets.SN_OAUTH_TOKEN_URL }}
+          SN_OAUTH_TOKEN_URL: ${{ secrets.SN_OAUTH_GOVCLOUD_TOKEN_URL }}
           SN_OAUTH_CLIENT_ID: ${{ secrets.SN_OAUTH_CLIENT_ID }}
           SN_OAUTH_CLIENT_SECRET: ${{ secrets.SN_OAUTH_CLIENT_SECRET }}
           SN_OAUTH_USERNAME: ${{ secrets.SN_OAUTH_USERNAME }}
