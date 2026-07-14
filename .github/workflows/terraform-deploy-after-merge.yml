@@ -25,13 +25,13 @@ jobs:
     environment: production
 
     env:
-      AWS_REGION: ${{ secrets.AWS_REGION }}
+      AWS_REGION: ${{ secrets.AWS_GOVCLOUD_REGION }}
       TF_ENV_PATH: terraform/environments/prod-s3-demo
       TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
-      TF_VAR_bucket_name: ${{ vars.TF_S3_DEMO_BUCKET_NAME }}
-      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+      TF_VAR_bucket_name: ${{ vars.TF_GOVCLOUD_S3_BUCKET_NAME }}
+      TF_STATE_BUCKET: ${{ vars.TF_GOVCLOUD_STATE_BUCKET }}
       TF_LOCK_TABLE: ${{ vars.TF_LOCK_TABLE }}
-      SN_INSTANCE_URL: ${{ secrets.SN_GOVCLOUDINSTANCE_URL }}
+      SN_INSTANCE_URL: ${{ secrets.SN_GOVCLOUD_INSTANCE_URL }}
       SN_DEPLOYMENT_CALLBACK_PATH: ${{ secrets.SN_DEPLOYMENT_CALLBACK_PATH }}
       SN_GITHUB_SHARED_SECRET: ${{ secrets.SN_GITHUB_SHARED_SECRET }}
       SN_OAUTH_TOKEN_URL: ${{ secrets.SN_GOVCLOUD_OAUTH_TOKEN_URL }}
@@ -267,7 +267,7 @@ jobs:
 
           missing="false"
 
-          for item in AWS_GOVCLOUD_REGION TF_STATE_BUCKET TF_GOVCLOUD_LOCK_TABLE SN_GOVCLOUD_INSTANCE_URL SN_DEPLOYMENT_CALLBACK_PATH SN_GITHUB_SHARED_SECRET SN_OAUTH_GOVCLOUD_TOKEN_URL SN_OAUTH_CLIENT_ID SN_OAUTH_GOVCLOUD_CLIENT_SECRET; do
+          for item in AWS_REGION TF_STATE_BUCKET TF_LOCK_TABLE SN_INSTANCE_URL SN_DEPLOYMENT_CALLBACK_PATH SN_GITHUB_SHARED_SECRET SN_OAUTH_TOKEN_URL SN_OAUTH_CLIENT_ID SN_OAUTH_CLIENT_SECRET; do
             if [ -z "${!item:-}" ]; then
               echo "Missing required value: ${item}"
               missing="true"
