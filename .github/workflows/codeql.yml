@@ -16,8 +16,7 @@ permissions:
   actions: read
   security-events: write
 
-# Explicit limits prevent CodeQL from calculating a negative RAM value
-# on a small self-hosted runner.
+# Limits CodeQL resource consumption on the self-hosted runner.
 env:
   CODEQL_RAM: "2048"
   CODEQL_THREADS: "1"
@@ -37,11 +36,12 @@ jobs:
       languages: ${{ steps.detect.outputs.languages }}
 
     steps:
+      # Pinned to a complete commit SHA rather than a mutable tag.
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - id: detect
-        name: Detect CodeQL-supported source
+        name: Detect CodeQL-supported languages
         shell: bash
         run: |
           set -euo pipefail
@@ -64,6 +64,9 @@ jobs:
               "__pycache__",
               ".venv",
               "venv",
+              "bin",
+              "obj",
+              "target",
               "codeql-results",
           }
 
@@ -75,8 +78,21 @@ jobs:
 
           languages = []
 
+          def add_language(
+              language: str,
+              display_name: str,
+              build_mode: str,
+          ) -> None:
+              languages.append(
+                  {
+                      "language": language,
+                      "display_name": display_name,
+                      "build_mode": build_mode,
+                  }
+              )
+
           # --------------------------------------------------
-          # GitHub Actions workflow detection
+          # GitHub Actions workflows
           # --------------------------------------------------
 
           workflow_directory = root / ".github" / "workflows"
@@ -90,16 +106,8 @@ jobs:
               )
           )
 
-          if has_actions:
-              languages.append(
-                  {
-                      "language": "actions",
-                      "display_name": "GitHub Actions",
-                  }
-              )
-
           # --------------------------------------------------
-          # Application source-code detection
+          # Supported application languages
           # --------------------------------------------------
 
           javascript_extensions = {
@@ -109,47 +117,147 @@ jobs:
               ".cjs",
               ".ts",
               ".tsx",
+              ".mts",
+              ".cts",
+              ".vue",
+          }
+
+          csharp_extensions = {
+              ".cs",
+              ".cshtml",
+              ".razor",
+              ".csproj",
+              ".sln",
+              ".slnx",
+              ".xaml",
+          }
+
+          cpp_extensions = {
+              ".c",
+              ".cc",
+              ".cpp",
+              ".cxx",
+              ".h",
+              ".hh",
+              ".hpp",
+              ".hxx",
           }
 
           has_javascript = False
           has_python = False
           has_go = False
+          has_java = False
+          has_kotlin = False
+          has_csharp = False
+          has_cpp = False
+          has_ruby = False
+          has_rust = False
 
           for path in root.rglob("*"):
               if not path.is_file() or is_ignored(path):
                   continue
 
               suffix = path.suffix.lower()
+              filename = path.name
 
               if suffix in javascript_extensions:
                   has_javascript = True
+
               elif suffix == ".py":
                   has_python = True
+
               elif suffix == ".go":
                   has_go = True
 
+              elif suffix == ".java":
+                  has_java = True
+
+              elif suffix in {".kt", ".kts"}:
+                  has_kotlin = True
+
+              elif suffix in csharp_extensions:
+                  has_csharp = True
+
+              elif suffix in cpp_extensions:
+                  has_cpp = True
+
+              elif (
+                  suffix in {".rb", ".erb", ".gemspec"}
+                  or filename == "Gemfile"
+              ):
+                  has_ruby = True
+
+              elif (
+                  suffix == ".rs"
+                  or filename == "Cargo.toml"
+              ):
+                  has_rust = True
+
+          # --------------------------------------------------
+          # Build the CodeQL language matrix
+          # --------------------------------------------------
+
+          if has_actions:
+              add_language(
+                  "actions",
+                  "GitHub Actions",
+                  "none",
+              )
+
           if has_javascript:
-              languages.append(
-                  {
-                      "language": "javascript-typescript",
-                      "display_name": "JavaScript/TypeScript",
-                  }
+              add_language(
+                  "javascript-typescript",
+                  "JavaScript/TypeScript",
+                  "none",
               )
 
           if has_python:
-              languages.append(
-                  {
-                      "language": "python",
-                      "display_name": "Python",
-                  }
+              add_language(
+                  "python",
+                  "Python",
+                  "none",
               )
 
           if has_go:
-              languages.append(
-                  {
-                      "language": "go",
-                      "display_name": "Go",
-                  }
+              add_language(
+                  "go",
+                  "Go",
+                  "autobuild",
+              )
+
+          if has_java or has_kotlin:
+              add_language(
+                  "java-kotlin",
+                  "Java/Kotlin",
+                  "autobuild" if has_kotlin else "none",
+              )
+
+          if has_csharp:
+              add_language(
+                  "csharp",
+                  "C#/.NET",
+                  "none",
+              )
+
+          if has_cpp:
+              add_language(
+                  "c-cpp",
+                  "C/C++",
+                  "none",
+              )
+
+          if has_ruby:
+              add_language(
+                  "ruby",
+                  "Ruby",
+                  "none",
+              )
+
+          if has_rust:
+              add_language(
+                  "rust",
+                  "Rust",
+                  "none",
               )
 
           has_code = bool(languages)
@@ -235,12 +343,14 @@ jobs:
           PY
 
   # ==========================================================
-  # 2. RUN CODEQL FOR EACH DETECTED LANGUAGE
+  # 2. ANALYZE EACH DETECTED LANGUAGE
   # ==========================================================
 
   analyze:
     name: codeql-analyze (${{ matrix.display_name }})
-    needs: detect
+
+    needs:
+      - detect
 
     if: needs.detect.outputs.has_code == 'true'
 
@@ -258,10 +368,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       # ------------------------------------------------------
-      # Configure client-approved CA certificates
+      # Configure the client-approved certificate bundle
       # ------------------------------------------------------
 
       - name: Configure CA bundle
@@ -271,8 +381,10 @@ jobs:
 
           if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
             CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
+
           elif [ -f /etc/pki/tls/certs/ca-bundle.crt ]; then
             CA_BUNDLE="/etc/pki/tls/certs/ca-bundle.crt"
+
           else
             echo "No trusted CA bundle found on the runner."
             exit 1
@@ -287,116 +399,27 @@ jobs:
           echo "Using CA bundle: ${CA_BUNDLE}"
 
       # ------------------------------------------------------
-      # Verify self-hosted runner capacity before CodeQL starts
+      # Display runner capacity for troubleshooting
       # ------------------------------------------------------
 
-      - name: Verify runner resources
+      - name: Display runner resources
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "=================================================="
-          echo "CPU"
-          echo "=================================================="
-
+          echo "CPU cores:"
           nproc
-          lscpu | grep -E \
-            'Model name|CPU\(s\)|Thread|Core' \
-            || true
 
           echo ""
-          echo "=================================================="
-          echo "Memory"
-          echo "=================================================="
-
+          echo "Memory:"
           free -h
 
-          TOTAL_MEMORY_MB="$(
-            awk '
-              /^MemTotal:/ {
-                printf "%d", $2 / 1024
-              }
-            ' /proc/meminfo
-          )"
-
-          AVAILABLE_MEMORY_MB="$(
-            awk '
-              /^MemAvailable:/ {
-                printf "%d", $2 / 1024
-              }
-            ' /proc/meminfo
-          )"
-
-          REQUIRED_TOTAL_MB=3000
-          REQUIRED_AVAILABLE_MB=2300
-
           echo ""
-          echo "Total memory:     ${TOTAL_MEMORY_MB} MB"
-          echo "Available memory: ${AVAILABLE_MEMORY_MB} MB"
-          echo "CodeQL RAM limit: ${CODEQL_RAM} MB"
-          echo "CodeQL threads:   ${CODEQL_THREADS}"
-
-          if [ "${TOTAL_MEMORY_MB}" -lt "${REQUIRED_TOTAL_MB}" ]; then
-            echo ""
-            echo "ERROR: Runner has insufficient total RAM."
-            echo "Detected: ${TOTAL_MEMORY_MB} MB"
-            echo "Required for this constrained test: ${REQUIRED_TOTAL_MB} MB"
-            echo "GitHub recommends an 8 GB runner for CodeQL."
-            exit 1
-          fi
-
-          if [ "${AVAILABLE_MEMORY_MB}" -lt "${REQUIRED_AVAILABLE_MB}" ]; then
-            echo ""
-            echo "ERROR: Runner has insufficient available RAM."
-            echo "Detected: ${AVAILABLE_MEMORY_MB} MB"
-            echo "Required: ${REQUIRED_AVAILABLE_MB} MB"
-            echo "Stop unnecessary processes or increase the EC2 instance size."
-            exit 1
-          fi
-
-          echo ""
-          echo "=================================================="
-          echo "Disk"
-          echo "=================================================="
-
+          echo "Disk:"
           df -h "${GITHUB_WORKSPACE}"
 
-          AVAILABLE_DISK_KB="$(
-            df -Pk "${GITHUB_WORKSPACE}" |
-            awk 'NR == 2 {print $4}'
-          )"
-
-          AVAILABLE_DISK_GB="$(
-            awk \
-              -v kb="${AVAILABLE_DISK_KB}" \
-              'BEGIN {
-                printf "%.2f", kb / 1024 / 1024
-              }'
-          )"
-
-          REQUIRED_DISK_GB=14
-          REQUIRED_DISK_KB=$(
-            (
-              REQUIRED_DISK_GB
-              * 1024
-              * 1024
-            )
-          )
-
-          echo "Available disk: ${AVAILABLE_DISK_GB} GB"
-          echo "Required disk:  ${REQUIRED_DISK_GB} GB"
-
-          if [ "${AVAILABLE_DISK_KB}" -lt "${REQUIRED_DISK_KB}" ]; then
-            echo ""
-            echo "ERROR: Insufficient free disk space for CodeQL."
-            exit 1
-          fi
-
-          echo ""
-          echo "Runner resource checks passed."
-
       # ------------------------------------------------------
-      # Remove stale output from an earlier self-hosted run
+      # Remove results left by an older self-hosted run
       # ------------------------------------------------------
 
       - name: Prepare CodeQL output directory
@@ -413,45 +436,37 @@ jobs:
       # ------------------------------------------------------
       # Initialize CodeQL
       #
-      # 2048 MB is used because the CodeQL query evaluator
-      # expects at least 2048 MB.
+      # Build mode is selected independently for each language.
       # ------------------------------------------------------
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
+        uses: github/codeql-action/init@7188fc363630916deb702c7fdcf4e481b751f97a # v4
         with:
           languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build_mode }}
           queries: security-extended
-          ram: 2048
-          threads: 1
+          ram: ${{ env.CODEQL_RAM }}
+          threads: ${{ env.CODEQL_THREADS }}
 
       # ------------------------------------------------------
-      # Go may require a build. This step is skipped for
-      # GitHub Actions, JavaScript/TypeScript and Python.
-      # ------------------------------------------------------
-
-      - name: Autobuild Go source
-        if: matrix.language == 'go'
-        uses: github/codeql-action/autobuild@v4
-
-      # ------------------------------------------------------
-      # Run CodeQL and save SARIF results locally
+      # Analyze the source and save the SARIF results
       # ------------------------------------------------------
 
       - name: Run CodeQL analysis
         id: analyze_codeql
-        uses: github/codeql-action/analyze@v4
+        uses: github/codeql-action/analyze@7188fc363630916deb702c7fdcf4e481b751f97a # v4
         with:
+          category: /language:${{ matrix.language }}
           output: ${{ env.CODEQL_RESULTS_DIR }}
           upload: always
           wait-for-processing: true
-          ram: 2048
-          threads: 1
+          ram: ${{ env.CODEQL_RAM }}
+          threads: ${{ env.CODEQL_THREADS }}
 
       # ------------------------------------------------------
-      # Strict security gate
+      # Strict gate
       #
-      # Every SARIF security result causes the job to fail.
+      # Any CodeQL SARIF result fails this language job.
       # ------------------------------------------------------
 
       - name: Fail if CodeQL finds security alerts
@@ -468,24 +483,17 @@ jobs:
           import sys
           from pathlib import Path
 
-          sarif_directory = os.environ.get(
-              "SARIF_DIRECTORY",
-              "",
-          ).strip()
+          root = Path(
+              os.environ.get(
+                  "SARIF_DIRECTORY",
+                  "",
+              )
+          )
 
           language = os.environ.get(
               "CODEQL_LANGUAGE",
               "Unknown",
           )
-
-          if not sarif_directory:
-              print(
-                  "ERROR: SARIF directory was not configured.",
-                  file=sys.stderr,
-              )
-              sys.exit(1)
-
-          root = Path(sarif_directory)
 
           if not root.exists():
               print(
@@ -507,7 +515,7 @@ jobs:
 
           if not sarif_files:
               print(
-                  f"ERROR: No SARIF files were found under "
+                  f"ERROR: No SARIF files found under "
                   f"{root}",
                   file=sys.stderr,
               )
@@ -517,27 +525,30 @@ jobs:
 
           for sarif_file in sarif_files:
               try:
-                  data = json.loads(
+                  sarif = json.loads(
                       sarif_file.read_text(
                           encoding="utf-8"
                       )
                   )
+
               except (
                   OSError,
                   json.JSONDecodeError,
               ) as error:
                   print(
-                      f"ERROR: Could not read "
+                      f"ERROR: Unable to read "
                       f"{sarif_file}: {error}",
                       file=sys.stderr,
                   )
                   sys.exit(1)
 
-              for run in data.get("runs", []):
+              for run in sarif.get("runs", []):
                   for result in run.get("results", []):
-                      kind = result.get(
-                          "kind",
-                          "fail",
+                      kind = str(
+                          result.get(
+                              "kind",
+                              "fail",
+                          )
                       ).lower()
 
                       if kind in {
@@ -560,7 +571,8 @@ jobs:
                           result.get(
                               "message",
                               {},
-                          ).get(
+                          )
+                          .get(
                               "text",
                               "No message provided.",
                           )
@@ -594,18 +606,14 @@ jobs:
                               )
                           )
 
-                          region = (
-                              physical_location.get(
-                                  "region",
-                                  {},
-                              )
+                          region = physical_location.get(
+                              "region",
+                              {},
                           )
 
-                          file_name = (
-                              artifact_location.get(
-                                  "uri",
-                                  file_name,
-                              )
+                          file_name = artifact_location.get(
+                              "uri",
+                              file_name,
                           )
 
                           line_number = region.get(
@@ -629,45 +637,13 @@ jobs:
                           }
                       )
 
-          def workflow_escape(value):
+          def workflow_escape(value: object) -> str:
               return (
                   str(value)
                   .replace("%", "%25")
                   .replace("\r", "%0D")
                   .replace("\n", "%0A")
               )
-
-          if findings:
-              print("")
-              print(
-                  f"CodeQL findings for {language}:"
-              )
-              print("")
-
-              for finding in findings:
-                  print(
-                      f"- {finding['rule_id']} "
-                      f"[{finding['level']}] "
-                      f"{finding['file']}:"
-                      f"{finding['line']}:"
-                      f"{finding['column']} - "
-                      f"{finding['message']}"
-                  )
-
-                  annotation = (
-                      f"[{finding['rule_id']}] "
-                      f"{finding['message']}"
-                  )
-
-                  print(
-                      "::error "
-                      f"file={workflow_escape(finding['file'])},"
-                      f"line={finding['line']},"
-                      f"col={finding['column']},"
-                      f"title=CodeQL "
-                      f"{workflow_escape(finding['rule_id'])}"
-                      f"::{workflow_escape(annotation)}"
-                  )
 
           summary_file = os.environ.get(
               "GITHUB_STEP_SUMMARY"
@@ -717,6 +693,7 @@ jobs:
                               f"{finding['line']}` "
                               f"| {safe_message} |\n"
                           )
+
                   else:
                       summary.write(
                           "No CodeQL security alerts "
@@ -725,28 +702,60 @@ jobs:
 
           if findings:
               print("")
-              print("CodeQL security gate failed.")
+              print(
+                  f"CodeQL findings for {language}:"
+              )
+              print("")
+
+              for finding in findings:
+                  print(
+                      f"- {finding['rule_id']} "
+                      f"[{finding['level']}] "
+                      f"{finding['file']}:"
+                      f"{finding['line']}:"
+                      f"{finding['column']} - "
+                      f"{finding['message']}"
+                  )
+
+                  annotation = (
+                      f"[{finding['rule_id']}] "
+                      f"{finding['message']}"
+                  )
+
+                  print(
+                      "::error "
+                      f"file={workflow_escape(finding['file'])},"
+                      f"line={finding['line']},"
+                      f"col={finding['column']},"
+                      f"title=CodeQL "
+                      f"{workflow_escape(finding['rule_id'])}"
+                      f"::{workflow_escape(annotation)}"
+                  )
+
+              print("")
+              print(
+                  "CodeQL security gate failed."
+              )
+
               print(
                   f"Total findings: {len(findings)}"
               )
+
               sys.exit(1)
 
           print(
               f"CodeQL security gate passed for "
-              f"{language}. No findings detected."
+              f"{language}. No alerts detected."
           )
           PY
 
       # ------------------------------------------------------
-      # Save the SARIF report for seven days
-      #
-      # A fixed path is used instead of the analyze output.
-      # This prevents an empty "path" input when analysis fails.
+      # Retain the SARIF report for seven days
       # ------------------------------------------------------
 
       - name: Upload CodeQL SARIF report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: >-
             codeql-sarif-${{ matrix.language }}-${{ github.run_id }}
@@ -756,7 +765,7 @@ jobs:
           if-no-files-found: warn
 
       # ------------------------------------------------------
-      # Remove the local report after artifact upload
+      # Remove local results from the persistent runner
       # ------------------------------------------------------
 
       - name: Remove local CodeQL report
@@ -768,12 +777,11 @@ jobs:
           rm -rf "${CODEQL_RESULTS_DIR}"
 
           echo "Removed local CodeQL result files."
-          df -h "${GITHUB_WORKSPACE}"
 
   # ==========================================================
   # 3. FINAL REQUIRED CODEQL CHECK
   #
-  # This produces a consistent branch-protection check named:
+  # Branch protection should require this check:
   #
   # codeql
   # ==========================================================
@@ -793,15 +801,23 @@ jobs:
       - name: Final CodeQL gate
         shell: bash
         env:
+          DETECT_RESULT: ${{ needs.detect.result }}
           HAS_CODE: ${{ needs.detect.outputs.has_code }}
           DETECTED_LANGUAGES: ${{ needs.detect.outputs.languages }}
           ANALYZE_RESULT: ${{ needs.analyze.result }}
         run: |
           set -euo pipefail
 
+          echo "Detection job result: ${DETECT_RESULT}"
           echo "Supported source detected: ${HAS_CODE}"
           echo "Detected languages: ${DETECTED_LANGUAGES}"
           echo "CodeQL analysis result: ${ANALYZE_RESULT}"
+
+          if [ "${DETECT_RESULT}" != "success" ]; then
+            echo ""
+            echo "CodeQL source detection failed."
+            exit 1
+          fi
 
           if [ "${HAS_CODE}" != "true" ]; then
             echo ""
