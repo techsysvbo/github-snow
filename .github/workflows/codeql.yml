@@ -16,9 +16,15 @@ permissions:
   actions: read
   security-events: write
 
+# Explicit limits prevent CodeQL from calculating a negative RAM value
+# on a small self-hosted runner.
+env:
+  CODEQL_RAM: "2048"
+  CODEQL_THREADS: "1"
+
 jobs:
   # ==========================================================
-  # 1. DETECT SUPPORTED CODEQL LANGUAGES
+  # 1. DETECT CODEQL-SUPPORTED LANGUAGES
   # ==========================================================
 
   detect:
@@ -58,10 +64,14 @@ jobs:
               "__pycache__",
               ".venv",
               "venv",
+              "codeql-results",
           }
 
           def is_ignored(path: Path) -> bool:
-              return any(part in ignored_directories for part in path.parts)
+              return any(
+                  part in ignored_directories
+                  for part in path.parts
+              )
 
           languages = []
 
@@ -153,11 +163,17 @@ jobs:
               for item in languages
           ]
 
-          output_file = Path(os.environ["GITHUB_OUTPUT"])
+          output_file = Path(
+              os.environ["GITHUB_OUTPUT"]
+          )
 
-          with output_file.open("a", encoding="utf-8") as output:
+          with output_file.open(
+              "a",
+              encoding="utf-8",
+          ) as output:
               output.write(
-                  f"has_code={'true' if has_code else 'false'}\n"
+                  f"has_code="
+                  f"{'true' if has_code else 'false'}\n"
               )
 
               output.write(
@@ -179,7 +195,9 @@ jobs:
                   + "\n"
               )
 
-          summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
+          summary_file = os.environ.get(
+              "GITHUB_STEP_SUMMARY"
+          )
 
           if summary_file:
               with open(
@@ -209,7 +227,7 @@ jobs:
           )
 
           print(
-              "Languages:",
+              "Detected languages:",
               ", ".join(language_names)
               if language_names
               else "none",
@@ -228,9 +246,15 @@ jobs:
 
     runs-on: [self-hosted, linux, x64, snow-github]
 
+    timeout-minutes: 45
+
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
+
+    env:
+      CODEQL_RESULTS_DIR: >-
+        ${{ github.workspace }}/codeql-results/${{ matrix.language }}
 
     steps:
       - name: Checkout repository
@@ -263,10 +287,134 @@ jobs:
           echo "Using CA bundle: ${CA_BUNDLE}"
 
       # ------------------------------------------------------
+      # Verify self-hosted runner capacity before CodeQL starts
+      # ------------------------------------------------------
+
+      - name: Verify runner resources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=================================================="
+          echo "CPU"
+          echo "=================================================="
+
+          nproc
+          lscpu | grep -E \
+            'Model name|CPU\(s\)|Thread|Core' \
+            || true
+
+          echo ""
+          echo "=================================================="
+          echo "Memory"
+          echo "=================================================="
+
+          free -h
+
+          TOTAL_MEMORY_MB="$(
+            awk '
+              /^MemTotal:/ {
+                printf "%d", $2 / 1024
+              }
+            ' /proc/meminfo
+          )"
+
+          AVAILABLE_MEMORY_MB="$(
+            awk '
+              /^MemAvailable:/ {
+                printf "%d", $2 / 1024
+              }
+            ' /proc/meminfo
+          )"
+
+          REQUIRED_TOTAL_MB=3000
+          REQUIRED_AVAILABLE_MB=2300
+
+          echo ""
+          echo "Total memory:     ${TOTAL_MEMORY_MB} MB"
+          echo "Available memory: ${AVAILABLE_MEMORY_MB} MB"
+          echo "CodeQL RAM limit: ${CODEQL_RAM} MB"
+          echo "CodeQL threads:   ${CODEQL_THREADS}"
+
+          if [ "${TOTAL_MEMORY_MB}" -lt "${REQUIRED_TOTAL_MB}" ]; then
+            echo ""
+            echo "ERROR: Runner has insufficient total RAM."
+            echo "Detected: ${TOTAL_MEMORY_MB} MB"
+            echo "Required for this constrained test: ${REQUIRED_TOTAL_MB} MB"
+            echo "GitHub recommends an 8 GB runner for CodeQL."
+            exit 1
+          fi
+
+          if [ "${AVAILABLE_MEMORY_MB}" -lt "${REQUIRED_AVAILABLE_MB}" ]; then
+            echo ""
+            echo "ERROR: Runner has insufficient available RAM."
+            echo "Detected: ${AVAILABLE_MEMORY_MB} MB"
+            echo "Required: ${REQUIRED_AVAILABLE_MB} MB"
+            echo "Stop unnecessary processes or increase the EC2 instance size."
+            exit 1
+          fi
+
+          echo ""
+          echo "=================================================="
+          echo "Disk"
+          echo "=================================================="
+
+          df -h "${GITHUB_WORKSPACE}"
+
+          AVAILABLE_DISK_KB="$(
+            df -Pk "${GITHUB_WORKSPACE}" |
+            awk 'NR == 2 {print $4}'
+          )"
+
+          AVAILABLE_DISK_GB="$(
+            awk \
+              -v kb="${AVAILABLE_DISK_KB}" \
+              'BEGIN {
+                printf "%.2f", kb / 1024 / 1024
+              }'
+          )"
+
+          REQUIRED_DISK_GB=14
+          REQUIRED_DISK_KB=$(
+            (
+              REQUIRED_DISK_GB
+              * 1024
+              * 1024
+            )
+          )
+
+          echo "Available disk: ${AVAILABLE_DISK_GB} GB"
+          echo "Required disk:  ${REQUIRED_DISK_GB} GB"
+
+          if [ "${AVAILABLE_DISK_KB}" -lt "${REQUIRED_DISK_KB}" ]; then
+            echo ""
+            echo "ERROR: Insufficient free disk space for CodeQL."
+            exit 1
+          fi
+
+          echo ""
+          echo "Runner resource checks passed."
+
+      # ------------------------------------------------------
+      # Remove stale output from an earlier self-hosted run
+      # ------------------------------------------------------
+
+      - name: Prepare CodeQL output directory
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf "${CODEQL_RESULTS_DIR}"
+          mkdir -p "${CODEQL_RESULTS_DIR}"
+
+          echo "CodeQL results directory:"
+          echo "${CODEQL_RESULTS_DIR}"
+
+      # ------------------------------------------------------
       # Initialize CodeQL
       #
-      # security-extended adds additional security queries
-      # beyond the default CodeQL security suite.
+      # 2048 MB is used because the CodeQL query evaluator
+      # expects at least 2048 MB.
       # ------------------------------------------------------
 
       - name: Initialize CodeQL
@@ -274,11 +422,12 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           queries: security-extended
+          ram: 2048
+          threads: 1
 
       # ------------------------------------------------------
-      # Go is compiled and may require autobuild.
-      # This step is skipped for interpreted languages and
-      # GitHub Actions workflow analysis.
+      # Go may require a build. This step is skipped for
+      # GitHub Actions, JavaScript/TypeScript and Python.
       # ------------------------------------------------------
 
       - name: Autobuild Go source
@@ -286,31 +435,29 @@ jobs:
         uses: github/codeql-action/autobuild@v4
 
       # ------------------------------------------------------
-      # Run CodeQL and save SARIF results locally.
-      #
-      # CodeQL normally uploads alerts to GitHub but does not
-      # fail simply because alerts were found. The next step
-      # parses the SARIF results and enforces zero findings.
+      # Run CodeQL and save SARIF results locally
       # ------------------------------------------------------
 
       - name: Run CodeQL analysis
         id: analyze_codeql
         uses: github/codeql-action/analyze@v4
         with:
-          output: codeql-results/${{ matrix.language }}
+          output: ${{ env.CODEQL_RESULTS_DIR }}
           upload: always
           wait-for-processing: true
+          ram: 2048
+          threads: 1
 
       # ------------------------------------------------------
       # Strict security gate
       #
-      # Any CodeQL SARIF result causes this job to fail.
+      # Every SARIF security result causes the job to fail.
       # ------------------------------------------------------
 
       - name: Fail if CodeQL finds security alerts
         shell: bash
         env:
-          SARIF_DIRECTORY: ${{ steps.analyze_codeql.outputs.sarif-output }}
+          SARIF_DIRECTORY: ${{ env.CODEQL_RESULTS_DIR }}
           CODEQL_LANGUAGE: ${{ matrix.display_name }}
         run: |
           set -euo pipefail
@@ -333,7 +480,7 @@ jobs:
 
           if not sarif_directory:
               print(
-                  "ERROR: CodeQL did not return a SARIF directory.",
+                  "ERROR: SARIF directory was not configured.",
                   file=sys.stderr,
               )
               sys.exit(1)
@@ -342,26 +489,26 @@ jobs:
 
           if not root.exists():
               print(
-                  f"ERROR: SARIF directory does not exist: {root}",
+                  f"ERROR: SARIF directory does not exist: "
+                  f"{root}",
                   file=sys.stderr,
               )
               sys.exit(1)
 
           sarif_files = sorted(
-              [
-                  path
-                  for path in root.rglob("*")
-                  if path.is_file()
-                  and (
-                      path.name.endswith(".sarif")
-                      or path.name.endswith(".sarif.json")
-                  )
-              ]
+              path
+              for path in root.rglob("*")
+              if path.is_file()
+              and (
+                  path.name.endswith(".sarif")
+                  or path.name.endswith(".sarif.json")
+              )
           )
 
           if not sarif_files:
               print(
-                  f"ERROR: No SARIF files found under {root}",
+                  f"ERROR: No SARIF files were found under "
+                  f"{root}",
                   file=sys.stderr,
               )
               sys.exit(1)
@@ -393,8 +540,6 @@ jobs:
                           "fail",
                       ).lower()
 
-                      # Do not treat explicit passed or
-                      # not-applicable results as alerts.
                       if kind in {
                           "pass",
                           "notapplicable",
@@ -411,14 +556,14 @@ jobs:
                           "warning",
                       )
 
-                      message_data = result.get(
-                          "message",
-                          {},
-                      )
-
-                      message = message_data.get(
-                          "text",
-                          "No message provided.",
+                      message = (
+                          result.get(
+                              "message",
+                              {},
+                          ).get(
+                              "text",
+                              "No message provided.",
+                          )
                       )
 
                       message = " ".join(
@@ -484,10 +629,6 @@ jobs:
                           }
                       )
 
-          # --------------------------------------------------
-          # GitHub annotation escaping
-          # --------------------------------------------------
-
           def workflow_escape(value):
               return (
                   str(value)
@@ -496,15 +637,10 @@ jobs:
                   .replace("\n", "%0A")
               )
 
-          # --------------------------------------------------
-          # Add detailed findings to the workflow log
-          # and annotate affected files.
-          # --------------------------------------------------
-
           if findings:
               print("")
               print(
-                  f"CodeQL security findings for {language}:"
+                  f"CodeQL findings for {language}:"
               )
               print("")
 
@@ -518,7 +654,7 @@ jobs:
                       f"{finding['message']}"
                   )
 
-                  annotation_message = (
+                  annotation = (
                       f"[{finding['rule_id']}] "
                       f"{finding['message']}"
                   )
@@ -528,13 +664,10 @@ jobs:
                       f"file={workflow_escape(finding['file'])},"
                       f"line={finding['line']},"
                       f"col={finding['column']},"
-                      f"title=CodeQL {workflow_escape(finding['rule_id'])}"
-                      f"::{workflow_escape(annotation_message)}"
+                      f"title=CodeQL "
+                      f"{workflow_escape(finding['rule_id'])}"
+                      f"::{workflow_escape(annotation)}"
                   )
-
-          # --------------------------------------------------
-          # Write job summary
-          # --------------------------------------------------
 
           summary_file = os.environ.get(
               "GITHUB_STEP_SUMMARY"
@@ -552,7 +685,7 @@ jobs:
                   )
 
                   summary.write(
-                      f"**Alerts found:** "
+                      f"**Security alerts found:** "
                       f"{len(findings)}\n\n"
                   )
 
@@ -590,48 +723,59 @@ jobs:
                           "were detected.\n"
                       )
 
-          # --------------------------------------------------
-          # Enforce zero-alert policy
-          # --------------------------------------------------
-
           if findings:
               print("")
+              print("CodeQL security gate failed.")
               print(
-                  "CodeQL security gate failed."
+                  f"Total findings: {len(findings)}"
               )
-
-              print(
-                  f"Total alerts: {len(findings)}"
-              )
-
               sys.exit(1)
 
           print(
               f"CodeQL security gate passed for "
-              f"{language}. No alerts detected."
+              f"{language}. No findings detected."
           )
           PY
 
       # ------------------------------------------------------
-      # Save CodeQL results for seven days.
-      # This still runs when the security gate fails.
+      # Save the SARIF report for seven days
+      #
+      # A fixed path is used instead of the analyze output.
+      # This prevents an empty "path" input when analysis fails.
       # ------------------------------------------------------
 
       - name: Upload CodeQL SARIF report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: codeql-sarif-${{ matrix.language }}-${{ github.run_id }}
-          path: ${{ steps.analyze_codeql.outputs.sarif-output }}
+          name: >-
+            codeql-sarif-${{ matrix.language }}-${{ github.run_id }}
+          path: >-
+            ${{ github.workspace }}/codeql-results/${{ matrix.language }}
           retention-days: 7
           if-no-files-found: warn
+
+      # ------------------------------------------------------
+      # Remove the local report after artifact upload
+      # ------------------------------------------------------
+
+      - name: Remove local CodeQL report
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf "${CODEQL_RESULTS_DIR}"
+
+          echo "Removed local CodeQL result files."
+          df -h "${GITHUB_WORKSPACE}"
 
   # ==========================================================
   # 3. FINAL REQUIRED CODEQL CHECK
   #
-  # This produces the consistent required status check:
+  # This produces a consistent branch-protection check named:
   #
-  #   codeql
+  # codeql
   # ==========================================================
 
   codeql:
@@ -670,10 +814,10 @@ jobs:
           if [ "${ANALYZE_RESULT}" != "success" ]; then
             echo ""
             echo "CodeQL security gate failed."
-            echo "One or more CodeQL language scans failed or found alerts."
+            echo "One or more CodeQL scans failed or found alerts."
             exit 1
           fi
 
           echo ""
           echo "CodeQL security gate passed."
-          echo "All detected CodeQL languages completed with zero alerts."
+          echo "All detected languages completed with zero alerts."
