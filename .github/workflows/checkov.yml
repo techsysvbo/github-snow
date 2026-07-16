@@ -66,24 +66,28 @@ jobs:
             --framework terraform \
             -o cli \
             -o json \
-            --output-file-path console,"${GITHUB_WORKSPACE}/checkov-results/checkov.json" \
-            --soft-fail
+            --output-file-path console,"${GITHUB_WORKSPACE}/checkov-results/checkov.json"
           CHECKOV_EXIT_CODE=$?
           set -e
 
-          echo "Checkov report location on runner:"
+          echo "Checkov report location:"
           echo "${GITHUB_WORKSPACE}/checkov-results/checkov.json"
 
           echo "Files created:"
           ls -la "${GITHUB_WORKSPACE}/checkov-results"
 
-          exit 0
+          if [ "${CHECKOV_EXIT_CODE}" -ne 0 ]; then
+            echo "Checkov found one or more failed security policies."
+            exit "${CHECKOV_EXIT_CODE}"
+          fi
+
+          echo "Checkov security gate passed."
 
       - name: Upload Checkov report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: checkov-report
+          name: checkov-report-${{ github.run_id }}
           path: checkov-results/
-          retention-days: 3
+          retention-days: 7
           if-no-files-found: error
