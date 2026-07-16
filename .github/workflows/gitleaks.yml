@@ -68,3 +68,28 @@ jobs:
             --source . \
             --no-banner \
             --redact
+
+      - name: Run Gitleaks secret scan
+        shell: bash
+        run: |
+          set -euo pipefail
+
+      mkdir -p "${GITHUB_WORKSPACE}/gitleaks-results"
+
+      set +e
+      "${GITLEAKS_BIN}" detect \
+        --source . \
+        --no-banner \
+        --redact \
+        --report-format sarif \
+        --report-path "${GITHUB_WORKSPACE}/gitleaks-results/gitleaks.sarif" \
+        --exit-code 1
+      GITLEAKS_EXIT_CODE=$?
+      set -e
+
+      if [ "${GITLEAKS_EXIT_CODE}" -ne 0 ]; then
+        echo "Gitleaks found an exposed secret or encountered a scan error."
+        exit "${GITLEAKS_EXIT_CODE}"
+      fi
+
+      echo "Gitleaks security gate passed."
