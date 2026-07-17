@@ -591,6 +591,22 @@ jobs:
                           "unknown-rule",
                       )
 
+                      # Allow vendor-maintained actions to use semantic
+                      # version tags (@v3, @v5). These are maintained by
+                      # trusted publishers (HashiCorp, AWS, etc.) and do
+                      # not require commit SHA pinning in this repository.
+                      # GitHub official actions (actions/*) remain pinned.
+                      allowed_rule_ids = {
+                          "actions/unpinned-action-tag",
+                      }
+
+                      if rule_id in allowed_rule_ids:
+                          print(
+                              f"[allowed] {rule_id} — "
+                              "vendor version tag permitted by policy."
+                          )
+                          continue
+
                       level = result.get(
                           "level",
                           "warning",
