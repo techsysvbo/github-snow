@@ -18,7 +18,7 @@ permissions:
 
 # Limits CodeQL resource consumption on the self-hosted runner.
 env:
-  CODEQL_RAM: "1024"
+  CODEQL_RAM: "2048"
   CODEQL_THREADS: "1"
 
 jobs:
@@ -367,6 +367,35 @@ jobs:
         ${{ github.workspace }}/codeql-results/${{ matrix.language }}
 
     steps:
+      # ------------------------------------------------------
+      # Provision swap so CodeQL meets its 2048 MiB floor on
+      # memory-constrained self-hosted runners (t3.small etc.)
+      # ------------------------------------------------------
+
+      - name: Provision swap space for CodeQL
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SWAP_FILE="/swapfile-codeql"
+          SWAP_SIZE_GB=4
+
+          if swapon --show | grep -q "${SWAP_FILE}"; then
+            echo "Swap already active at ${SWAP_FILE}. Skipping."
+            free -h
+            exit 0
+          fi
+
+          echo "Provisioning ${SWAP_SIZE_GB}G swap at ${SWAP_FILE}..."
+
+          sudo fallocate -l "${SWAP_SIZE_GB}G" "${SWAP_FILE}"
+          sudo chmod 600 "${SWAP_FILE}"
+          sudo mkswap "${SWAP_FILE}"
+          sudo swapon "${SWAP_FILE}"
+
+          echo "Swap provisioned."
+          free -h
+
       - name: Checkout repository
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
