@@ -18,7 +18,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           fetch-depth: 0
 
@@ -49,11 +49,16 @@ jobs:
           rm -rf "${INSTALL_DIR}"
           mkdir -p "${INSTALL_DIR}"
 
-          curl --fail --location --silent --show-error \
+          curl --fail \
+            --location \
+            --silent \
+            --show-error \
             "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" \
             --output "${INSTALL_DIR}/gitleaks.tar.gz"
 
-          tar -xzf "${INSTALL_DIR}/gitleaks.tar.gz" -C "${INSTALL_DIR}"
+          tar -xzf \
+            "${INSTALL_DIR}/gitleaks.tar.gz" \
+            -C "${INSTALL_DIR}"
 
           chmod +x "${INSTALL_DIR}/gitleaks"
 
@@ -64,7 +69,33 @@ jobs:
         run: |
           set -euo pipefail
 
+          mkdir -p "${GITHUB_WORKSPACE}/gitleaks-results"
+
+          set +e
           "${GITLEAKS_BIN}" detect \
             --source . \
             --no-banner \
-            --redact
+            --redact \
+            --report-format sarif \
+            --report-path "${GITHUB_WORKSPACE}/gitleaks-results/gitleaks.sarif" \
+            --exit-code 1
+          GITLEAKS_EXIT_CODE=$?
+          set -e
+
+          echo "Gitleaks exit code: ${GITLEAKS_EXIT_CODE}"
+
+          if [ "${GITLEAKS_EXIT_CODE}" -ne 0 ]; then
+            echo "Gitleaks found an exposed secret or encountered a scan error."
+            exit "${GITLEAKS_EXIT_CODE}"
+          fi
+
+          echo "Gitleaks security gate passed."
+
+      - name: Upload Gitleaks report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gitleaks-report-${{ github.run_id }}
+          path: gitleaks-results/
+          retention-days: 7
+          if-no-files-found: warn

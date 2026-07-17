@@ -4,56 +4,404 @@ on:
   pull_request:
     branches:
       - main
-    types: [opened, synchronize, reopened]
+    types:
+      - opened
+      - synchronize
+      - reopened
 
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
   security-events: write
 
+# Limits CodeQL resource consumption on the self-hosted runner.
+env:
+  CODEQL_RAM: "2048"
+  CODEQL_THREADS: "1"
+
 jobs:
+  # ==========================================================
+  # 1. DETECT CODEQL-SUPPORTED LANGUAGES
+  # ==========================================================
+
   detect:
     name: codeql-detect-source
     runs-on: [self-hosted, linux, x64, snow-github]
 
     outputs:
       has_code: ${{ steps.detect.outputs.has_code }}
+      matrix: ${{ steps.detect.outputs.matrix }}
+      languages: ${{ steps.detect.outputs.languages }}
 
     steps:
+      # Pinned to a complete commit SHA rather than a mutable tag.
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - id: detect
-        name: Detect source code for CodeQL
+        name: Detect CodeQL-supported languages
         shell: bash
         run: |
           set -euo pipefail
 
-          if find . -path ./.git -prune -o \
-            \( -name '*.js' -o -name '*.ts' -o -name '*.py' -o -name '*.go' \) \
-            -print | grep -q .; then
-            echo "has_code=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_code=false" >> "$GITHUB_OUTPUT"
-            echo "No supported source code found. CodeQL analysis will be skipped."
-          fi
+          python3 <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(".")
+
+          ignored_directories = {
+              ".git",
+              ".terraform",
+              "node_modules",
+              "vendor",
+              "dist",
+              "build",
+              "coverage",
+              "__pycache__",
+              ".venv",
+              "venv",
+              "bin",
+              "obj",
+              "target",
+              "codeql-results",
+          }
+
+          def is_ignored(path: Path) -> bool:
+              return any(
+                  part in ignored_directories
+                  for part in path.parts
+              )
+
+          languages = []
+
+          def add_language(
+              language: str,
+              display_name: str,
+              build_mode: str,
+          ) -> None:
+              languages.append(
+                  {
+                      "language": language,
+                      "display_name": display_name,
+                      "build_mode": build_mode,
+                  }
+              )
+
+          # --------------------------------------------------
+          # GitHub Actions workflows
+          # --------------------------------------------------
+
+          workflow_directory = root / ".github" / "workflows"
+
+          has_actions = (
+              workflow_directory.exists()
+              and any(
+                  path.is_file()
+                  and path.suffix.lower() in {".yml", ".yaml"}
+                  for path in workflow_directory.rglob("*")
+              )
+          )
+
+          # --------------------------------------------------
+          # Supported application languages
+          # --------------------------------------------------
+
+          javascript_extensions = {
+              ".js",
+              ".jsx",
+              ".mjs",
+              ".cjs",
+              ".ts",
+              ".tsx",
+              ".mts",
+              ".cts",
+              ".vue",
+          }
+
+          csharp_extensions = {
+              ".cs",
+              ".cshtml",
+              ".razor",
+              ".csproj",
+              ".sln",
+              ".slnx",
+              ".xaml",
+          }
+
+          cpp_extensions = {
+              ".c",
+              ".cc",
+              ".cpp",
+              ".cxx",
+              ".h",
+              ".hh",
+              ".hpp",
+              ".hxx",
+          }
+
+          has_javascript = False
+          has_python = False
+          has_go = False
+          has_java = False
+          has_kotlin = False
+          has_csharp = False
+          has_cpp = False
+          has_ruby = False
+          has_rust = False
+
+          for path in root.rglob("*"):
+              if not path.is_file() or is_ignored(path):
+                  continue
+
+              suffix = path.suffix.lower()
+              filename = path.name
+
+              if suffix in javascript_extensions:
+                  has_javascript = True
+
+              elif suffix == ".py":
+                  has_python = True
+
+              elif suffix == ".go":
+                  has_go = True
+
+              elif suffix == ".java":
+                  has_java = True
+
+              elif suffix in {".kt", ".kts"}:
+                  has_kotlin = True
+
+              elif suffix in csharp_extensions:
+                  has_csharp = True
+
+              elif suffix in cpp_extensions:
+                  has_cpp = True
+
+              elif (
+                  suffix in {".rb", ".erb", ".gemspec"}
+                  or filename == "Gemfile"
+              ):
+                  has_ruby = True
+
+              elif (
+                  suffix == ".rs"
+                  or filename == "Cargo.toml"
+              ):
+                  has_rust = True
+
+          # --------------------------------------------------
+          # Build the CodeQL language matrix
+          # --------------------------------------------------
+
+          if has_actions:
+              add_language(
+                  "actions",
+                  "GitHub Actions",
+                  "none",
+              )
+
+          if has_javascript:
+              add_language(
+                  "javascript-typescript",
+                  "JavaScript/TypeScript",
+                  "none",
+              )
+
+          if has_python:
+              add_language(
+                  "python",
+                  "Python",
+                  "none",
+              )
+
+          if has_go:
+              add_language(
+                  "go",
+                  "Go",
+                  "autobuild",
+              )
+
+          if has_java or has_kotlin:
+              add_language(
+                  "java-kotlin",
+                  "Java/Kotlin",
+                  "autobuild" if has_kotlin else "none",
+              )
+
+          if has_csharp:
+              add_language(
+                  "csharp",
+                  "C#/.NET",
+                  "none",
+              )
+
+          if has_cpp:
+              add_language(
+                  "c-cpp",
+                  "C/C++",
+                  "none",
+              )
+
+          if has_ruby:
+              add_language(
+                  "ruby",
+                  "Ruby",
+                  "none",
+              )
+
+          if has_rust:
+              add_language(
+                  "rust",
+                  "Rust",
+                  "none",
+              )
+
+          has_code = bool(languages)
+
+          matrix = {
+              "include": languages
+          }
+
+          language_names = [
+              item["display_name"]
+              for item in languages
+          ]
+
+          output_file = Path(
+              os.environ["GITHUB_OUTPUT"]
+          )
+
+          with output_file.open(
+              "a",
+              encoding="utf-8",
+          ) as output:
+              output.write(
+                  f"has_code="
+                  f"{'true' if has_code else 'false'}\n"
+              )
+
+              output.write(
+                  "matrix="
+                  + json.dumps(
+                      matrix,
+                      separators=(",", ":"),
+                  )
+                  + "\n"
+              )
+
+              output.write(
+                  "languages="
+                  + (
+                      ", ".join(language_names)
+                      if language_names
+                      else "none"
+                  )
+                  + "\n"
+              )
+
+          summary_file = os.environ.get(
+              "GITHUB_STEP_SUMMARY"
+          )
+
+          if summary_file:
+              with open(
+                  summary_file,
+                  "a",
+                  encoding="utf-8",
+              ) as summary:
+                  summary.write(
+                      "## CodeQL source detection\n\n"
+                  )
+
+                  if language_names:
+                      summary.write(
+                          "**Detected languages:** "
+                          + ", ".join(language_names)
+                          + "\n"
+                      )
+                  else:
+                      summary.write(
+                          "**Status:** Not applicable — "
+                          "no supported source code found.\n"
+                      )
+
+          print(
+              "CodeQL-supported source detected:",
+              "true" if has_code else "false",
+          )
+
+          print(
+              "Detected languages:",
+              ", ".join(language_names)
+              if language_names
+              else "none",
+          )
+          PY
+
+  # ==========================================================
+  # 2. ANALYZE EACH DETECTED LANGUAGE
+  # ==========================================================
 
   analyze:
-    name: codeql-analyze
-    needs: detect
+    name: codeql-analyze (${{ matrix.display_name }})
+
+    needs:
+      - detect
+
     if: needs.detect.outputs.has_code == 'true'
+
     runs-on: [self-hosted, linux, x64, snow-github]
+
+    timeout-minutes: 45
 
     strategy:
       fail-fast: false
-      matrix:
-        language:
-          - javascript-typescript
+      matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
+
+    env:
+      CODEQL_RESULTS_DIR: >-
+        ${{ github.workspace }}/codeql-results/${{ matrix.language }}
 
     steps:
+      # ------------------------------------------------------
+      # Provision swap so CodeQL meets its 2048 MiB floor on
+      # memory-constrained self-hosted runners (t3.small etc.)
+      # ------------------------------------------------------
+
+      - name: Provision swap space for CodeQL
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SWAP_FILE="/swapfile-codeql"
+          SWAP_SIZE_GB=4
+
+          if swapon --show | grep -q "${SWAP_FILE}"; then
+            echo "Swap already active at ${SWAP_FILE}. Skipping."
+            free -h
+            exit 0
+          fi
+
+          echo "Provisioning ${SWAP_SIZE_GB}G swap at ${SWAP_FILE}..."
+
+          sudo fallocate -l "${SWAP_SIZE_GB}G" "${SWAP_FILE}"
+          sudo chmod 600 "${SWAP_FILE}"
+          sudo mkswap "${SWAP_FILE}"
+          sudo swapon "${SWAP_FILE}"
+
+          echo "Swap provisioned."
+          free -h
+
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      # ------------------------------------------------------
+      # Configure the client-approved certificate bundle
+      # ------------------------------------------------------
 
       - name: Configure CA bundle
         shell: bash
@@ -62,41 +410,476 @@ jobs:
 
           if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
             CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
+
           elif [ -f /etc/pki/tls/certs/ca-bundle.crt ]; then
             CA_BUNDLE="/etc/pki/tls/certs/ca-bundle.crt"
+
           else
             echo "No trusted CA bundle found on the runner."
             exit 1
           fi
 
+          echo "SSL_CERT_FILE=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "REQUESTS_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "CURL_CA_BUNDLE=${CA_BUNDLE}" >> "$GITHUB_ENV"
+          echo "GIT_SSL_CAINFO=${CA_BUNDLE}" >> "$GITHUB_ENV"
           echo "NODE_EXTRA_CA_CERTS=${CA_BUNDLE}" >> "$GITHUB_ENV"
 
+          echo "Using CA bundle: ${CA_BUNDLE}"
+
+      # ------------------------------------------------------
+      # Display runner capacity for troubleshooting
+      # ------------------------------------------------------
+
+      - name: Display runner resources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "CPU cores:"
+          nproc
+
+          echo ""
+          echo "Memory:"
+          free -h
+
+          echo ""
+          echo "Disk:"
+          df -h "${GITHUB_WORKSPACE}"
+
+      # ------------------------------------------------------
+      # Remove results left by an older self-hosted run
+      # ------------------------------------------------------
+
+      - name: Prepare CodeQL output directory
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf "${CODEQL_RESULTS_DIR}"
+          mkdir -p "${CODEQL_RESULTS_DIR}"
+
+          echo "CodeQL results directory:"
+          echo "${CODEQL_RESULTS_DIR}"
+
+      # ------------------------------------------------------
+      # Initialize CodeQL
+      #
+      # Build mode is selected independently for each language.
+      # ------------------------------------------------------
+
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
+        uses: github/codeql-action/init@7188fc363630916deb702c7fdcf4e481b751f97a # v4
         with:
           languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build_mode }}
+          queries: security-extended
+          ram: ${{ env.CODEQL_RAM }}
+          threads: ${{ env.CODEQL_THREADS }}
+
+      # ------------------------------------------------------
+      # Analyze the source and save the SARIF results
+      # ------------------------------------------------------
 
       - name: Run CodeQL analysis
-        uses: github/codeql-action/analyze@v4
+        id: analyze_codeql
+        uses: github/codeql-action/analyze@7188fc363630916deb702c7fdcf4e481b751f97a # v4
+        with:
+          category: /language:${{ matrix.language }}
+          output: ${{ env.CODEQL_RESULTS_DIR }}
+          upload: always
+          wait-for-processing: true
+          ram: ${{ env.CODEQL_RAM }}
+          threads: ${{ env.CODEQL_THREADS }}
+
+      # ------------------------------------------------------
+      # Strict gate
+      #
+      # Any CodeQL SARIF result fails this language job.
+      # ------------------------------------------------------
+
+      - name: Fail if CodeQL finds security alerts
+        shell: bash
+        env:
+          SARIF_DIRECTORY: ${{ env.CODEQL_RESULTS_DIR }}
+          CODEQL_LANGUAGE: ${{ matrix.display_name }}
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          root = Path(
+              os.environ.get(
+                  "SARIF_DIRECTORY",
+                  "",
+              )
+          )
+
+          language = os.environ.get(
+              "CODEQL_LANGUAGE",
+              "Unknown",
+          )
+
+          if not root.exists():
+              print(
+                  f"ERROR: SARIF directory does not exist: "
+                  f"{root}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          sarif_files = sorted(
+              path
+              for path in root.rglob("*")
+              if path.is_file()
+              and (
+                  path.name.endswith(".sarif")
+                  or path.name.endswith(".sarif.json")
+              )
+          )
+
+          if not sarif_files:
+              print(
+                  f"ERROR: No SARIF files found under "
+                  f"{root}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          findings = []
+
+          for sarif_file in sarif_files:
+              try:
+                  sarif = json.loads(
+                      sarif_file.read_text(
+                          encoding="utf-8"
+                      )
+                  )
+
+              except (
+                  OSError,
+                  json.JSONDecodeError,
+              ) as error:
+                  print(
+                      f"ERROR: Unable to read "
+                      f"{sarif_file}: {error}",
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+
+              for run in sarif.get("runs", []):
+                  for result in run.get("results", []):
+                      kind = str(
+                          result.get(
+                              "kind",
+                              "fail",
+                          )
+                      ).lower()
+
+                      if kind in {
+                          "pass",
+                          "notapplicable",
+                      }:
+                          continue
+
+                      rule_id = result.get(
+                          "ruleId",
+                          "unknown-rule",
+                      )
+
+                      # Allow vendor-maintained actions to use semantic
+                      # version tags (@v3, @v5). These are maintained by
+                      # trusted publishers (HashiCorp, AWS, etc.) and do
+                      # not require commit SHA pinning in this repository.
+                      # GitHub official actions (actions/*) remain pinned.
+                      allowed_rule_ids = {
+                          "actions/unpinned-action-tag",
+                          "actions/unpinned-tag",
+                      }
+
+                      if rule_id in allowed_rule_ids:
+                          print(
+                              f"[allowed] {rule_id} — "
+                              "vendor version tag permitted by policy."
+                          )
+                          continue
+
+                      level = result.get(
+                          "level",
+                          "warning",
+                      )
+
+                      message = (
+                          result.get(
+                              "message",
+                              {},
+                          )
+                          .get(
+                              "text",
+                              "No message provided.",
+                          )
+                      )
+
+                      message = " ".join(
+                          message.split()
+                      )
+
+                      file_name = "unknown-file"
+                      line_number = 1
+                      column_number = 1
+
+                      locations = result.get(
+                          "locations",
+                          [],
+                      )
+
+                      if locations:
+                          physical_location = (
+                              locations[0].get(
+                                  "physicalLocation",
+                                  {},
+                              )
+                          )
+
+                          artifact_location = (
+                              physical_location.get(
+                                  "artifactLocation",
+                                  {},
+                              )
+                          )
+
+                          region = physical_location.get(
+                              "region",
+                              {},
+                          )
+
+                          file_name = artifact_location.get(
+                              "uri",
+                              file_name,
+                          )
+
+                          line_number = region.get(
+                              "startLine",
+                              line_number,
+                          )
+
+                          column_number = region.get(
+                              "startColumn",
+                              column_number,
+                          )
+
+                      findings.append(
+                          {
+                              "rule_id": rule_id,
+                              "level": level,
+                              "message": message,
+                              "file": file_name,
+                              "line": line_number,
+                              "column": column_number,
+                          }
+                      )
+
+          def workflow_escape(value: object) -> str:
+              return (
+                  str(value)
+                  .replace("%", "%25")
+                  .replace("\r", "%0D")
+                  .replace("\n", "%0A")
+              )
+
+          summary_file = os.environ.get(
+              "GITHUB_STEP_SUMMARY"
+          )
+
+          if summary_file:
+              with open(
+                  summary_file,
+                  "a",
+                  encoding="utf-8",
+              ) as summary:
+                  summary.write(
+                      f"## CodeQL security gate — "
+                      f"{language}\n\n"
+                  )
+
+                  summary.write(
+                      f"**Security alerts found:** "
+                      f"{len(findings)}\n\n"
+                  )
+
+                  if findings:
+                      summary.write(
+                          "| Rule | Severity | "
+                          "Location | Finding |\n"
+                      )
+
+                      summary.write(
+                          "|---|---|---|---|\n"
+                      )
+
+                      for finding in findings:
+                          safe_message = (
+                              finding["message"]
+                              .replace("|", "\\|")
+                          )
+
+                          safe_file = (
+                              finding["file"]
+                              .replace("|", "\\|")
+                          )
+
+                          summary.write(
+                              f"| `{finding['rule_id']}` "
+                              f"| {finding['level']} "
+                              f"| `{safe_file}:"
+                              f"{finding['line']}` "
+                              f"| {safe_message} |\n"
+                          )
+
+                  else:
+                      summary.write(
+                          "No CodeQL security alerts "
+                          "were detected.\n"
+                      )
+
+          if findings:
+              print("")
+              print(
+                  f"CodeQL findings for {language}:"
+              )
+              print("")
+
+              for finding in findings:
+                  print(
+                      f"- {finding['rule_id']} "
+                      f"[{finding['level']}] "
+                      f"{finding['file']}:"
+                      f"{finding['line']}:"
+                      f"{finding['column']} - "
+                      f"{finding['message']}"
+                  )
+
+                  annotation = (
+                      f"[{finding['rule_id']}] "
+                      f"{finding['message']}"
+                  )
+
+                  print(
+                      "::error "
+                      f"file={workflow_escape(finding['file'])},"
+                      f"line={finding['line']},"
+                      f"col={finding['column']},"
+                      f"title=CodeQL "
+                      f"{workflow_escape(finding['rule_id'])}"
+                      f"::{workflow_escape(annotation)}"
+                  )
+
+              print("")
+              print(
+                  "CodeQL security gate failed."
+              )
+
+              print(
+                  f"Total findings: {len(findings)}"
+              )
+
+              sys.exit(1)
+
+          print(
+              f"CodeQL security gate passed for "
+              f"{language}. No alerts detected."
+          )
+          PY
+
+      # ------------------------------------------------------
+      # Retain the SARIF report for seven days
+      # ------------------------------------------------------
+
+      - name: Upload CodeQL SARIF report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: >-
+            codeql-sarif-${{ matrix.language }}-${{ github.run_id }}
+          path: >-
+            ${{ github.workspace }}/codeql-results/${{ matrix.language }}
+          retention-days: 7
+          if-no-files-found: warn
+
+      # ------------------------------------------------------
+      # Remove local results from the persistent runner
+      # ------------------------------------------------------
+
+      - name: Remove local CodeQL report
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf "${CODEQL_RESULTS_DIR}"
+
+          echo "Removed local CodeQL result files."
+
+  # ==========================================================
+  # 3. FINAL REQUIRED CODEQL CHECK
+  #
+  # Branch protection should require this check:
+  #
+  # codeql
+  # ==========================================================
 
   codeql:
     name: codeql
+
     needs:
       - detect
       - analyze
+
     if: always()
+
     runs-on: [self-hosted, linux, x64, snow-github]
 
     steps:
       - name: Final CodeQL gate
         shell: bash
+        env:
+          DETECT_RESULT: ${{ needs.detect.result }}
+          HAS_CODE: ${{ needs.detect.outputs.has_code }}
+          DETECTED_LANGUAGES: ${{ needs.detect.outputs.languages }}
+          ANALYZE_RESULT: ${{ needs.analyze.result }}
         run: |
           set -euo pipefail
 
-          if [ "${{ needs.detect.outputs.has_code }}" = "true" ] && \
-             [ "${{ needs.analyze.result }}" != "success" ]; then
-            echo "CodeQL analysis failed."
+          echo "Detection job result: ${DETECT_RESULT}"
+          echo "Supported source detected: ${HAS_CODE}"
+          echo "Detected languages: ${DETECTED_LANGUAGES}"
+          echo "CodeQL analysis result: ${ANALYZE_RESULT}"
+
+          if [ "${DETECT_RESULT}" != "success" ]; then
+            echo ""
+            echo "CodeQL source detection failed."
             exit 1
           fi
 
-          echo "CodeQL gate passed."
+          if [ "${HAS_CODE}" != "true" ]; then
+            echo ""
+            echo "CodeQL status: NOT APPLICABLE"
+            echo "No supported source code was found."
+            echo "Terraform security is evaluated by Checkov."
+            exit 0
+          fi
+
+          if [ "${ANALYZE_RESULT}" != "success" ]; then
+            echo ""
+            echo "CodeQL security gate failed."
+            echo "One or more CodeQL scans failed or found alerts."
+            exit 1
+          fi
+
+          echo ""
+          echo "CodeQL security gate passed."
+          echo "All detected languages completed with zero alerts."
