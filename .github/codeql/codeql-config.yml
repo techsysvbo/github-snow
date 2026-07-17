@@ -22,7 +22,7 @@ queries-filters:
     # Exclude unpinned-tag checks for vendor-maintained actions.
     # These actions use semantic versioning (@v3, @v5) maintained by their publishers.
     # Breaking changes move to new major versions, so @v3 is stable within its lifetime.
-    - id: actions/unpinned-action-tag
+    - id: actions/unpinned-tag
       # This allows:
       # - hashicorp/setup-terraform@v3
       # - aws-actions/configure-aws-credentials@v5
