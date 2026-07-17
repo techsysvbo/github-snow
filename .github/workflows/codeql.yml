@@ -18,7 +18,7 @@ permissions:
 
 # Limits CodeQL resource consumption on the self-hosted runner.
 env:
-  CODEQL_RAM: "2048"
+  CODEQL_RAM: "1024"
   CODEQL_THREADS: "1"
 
 jobs:
