@@ -335,7 +335,7 @@ jobs:
           esac
 
       - name: Configure AWS credentials using GitHub OIDC
-        uses: aws-actions/configure-aws-credentials@v5
+        uses: aws-actions/configure-aws-credentials@1b02daf9ef4ac79b7fdf8b00c1edbab95f1f30e6 # v5
         with:
           role-to-assume: ${{ secrets.AWS_GOVCLOUD_WEST_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_GOVCLOUD_REGION }}
@@ -345,7 +345,7 @@ jobs:
         run: aws sts get-caller-identity
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@1a54a8d0bf59da7fb926cdfde57c07e7ee3b91fb # v3
         with:
           terraform_version: 1.9.5
             # terraform_wrapper: false
