@@ -42,7 +42,7 @@ jobs:
 
     steps:
       - name: Checkout main
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Detect CA bundle path
         shell: bash
@@ -335,7 +335,7 @@ jobs:
           esac
 
       - name: Configure AWS credentials using GitHub OIDC
-        uses: aws-actions/configure-aws-credentials@v5
+        uses: aws-actions/configure-aws-credentials@1a78dfe5c0b12b88d2f1b0cbf8c08c6d9b0c2e60 # v5
         with:
           role-to-assume: ${{ secrets.AWS_GOVCLOUD_WEST_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_GOVCLOUD_REGION }}
@@ -345,7 +345,7 @@ jobs:
         run: aws sts get-caller-identity
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@8a232fbf4c41b8b2ea35621b4b9ca0fdf10dc076 # v3
         with:
           terraform_version: 1.9.5
             # terraform_wrapper: false
@@ -388,7 +388,7 @@ jobs:
 
       - name: Upload Terraform plan artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: terraform-plan-${{ github.run_id }}
           path: ${{ env.TF_ENV_PATH }}/plan_summary.txt
