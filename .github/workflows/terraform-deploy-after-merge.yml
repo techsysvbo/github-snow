@@ -25,6 +25,7 @@ jobs:
     environment: production
 
     env:
+      AWS_GOVCLOUD_REGION: ${{ secrets.AWS_GOVCLOUD_REGION }}
       AWS_REGION: ${{ secrets.AWS_GOVCLOUD_REGION }}
       TF_ENV_PATH: terraform/environments/prod-s3-demo
       TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
