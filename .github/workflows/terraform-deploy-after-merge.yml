@@ -338,7 +338,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v5
         with:
           role-to-assume: ${{ secrets.AWS_GOVCLOUD_WEST_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_GOVCLOUD_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
           role-session-name: gha-prod-deploy-${{ github.run_id }}
 
       - name: Verify AWS identity
