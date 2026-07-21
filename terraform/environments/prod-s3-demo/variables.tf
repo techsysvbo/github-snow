@@ -1,9 +1,9 @@
 variable "aws_region" {
-  description = "AWS region for the S3-only demonstration."
+  description = "AWS Region supplied by the GitHub production environment."
   type        = string
 }
 
 variable "bucket_name" {
-  description = "Unique S3 bucket name for the demonstration."
+  description = "Exact S3 bucket name supplied by the GitHub production environment."
   type        = string
 }
