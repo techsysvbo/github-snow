@@ -10,7 +10,7 @@ REPO="${REPO:-techsysvbo/github-snow}"
 ENVIRONMENT_NAME="${ENVIRONMENT_NAME:-production}"
 BRANCH_NAME="${BRANCH_NAME:-main}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
-ROLE_NAME="${ROLE_NAME:-github-snow-govcloud-terraform-deploy-role}"
+ROLE_NAME="${ROLE_NAME:-github-snow-terraform-deploy-role}"
 GOVCLOUD_PREFIX="${GOVCLOUD_PREFIX:-github-snow-govcloud}"
 DEMO_BUCKET_NAME="${DEMO_BUCKET_NAME:-${GOVCLOUD_PREFIX}-s3-demo}"
 
