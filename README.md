@@ -39,6 +39,7 @@ Thank you JESUS MY LORD
 Thank you JESUS MY LORD
 Thank you JESUS MY LORD
 Thank you JESUS MY LORD
+Glory, Glory HAHAHA
 
 
 GitHub Secrets
