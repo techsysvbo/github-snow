@@ -19,6 +19,17 @@ jobs:
     runs-on: [self-hosted, linux, x64, snow-github]
 
     steps:
+      - name: Install GitHub CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! command -v gh >/dev/null 2>&1; then
+            echo "Installing GitHub CLI"
+            sudo apt-get update
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y gh
+          fi
+
       - name: Reset SNOW approval gate to pending
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
