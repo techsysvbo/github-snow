@@ -20,6 +20,31 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
+      - name: Install runner prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! command -v python3 >/dev/null 2>&1; then
+            echo "python3 is required but not installed."
+            exit 1
+          fi
+
+          if ! python3 - <<'PY' >/dev/null 2>&1
+          import venv
+          PY
+          then
+            echo "Installing python3-venv for virtualenv support"
+            sudo apt-get update
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv
+          fi
+
+          if ! command -v unzip >/dev/null 2>&1; then
+            echo "Installing unzip"
+            sudo apt-get update
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y unzip
+          fi
+
       - name: Configure CA bundle
         shell: bash
         run: |

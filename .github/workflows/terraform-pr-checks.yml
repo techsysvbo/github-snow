@@ -34,6 +34,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
+      - name: Install runner prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! command -v unzip >/dev/null 2>&1; then
+            echo "Installing unzip for Terraform setup"
+            sudo apt-get update
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y unzip
+          fi
+
       - name: Configure CA bundle
         shell: bash
         run: |
